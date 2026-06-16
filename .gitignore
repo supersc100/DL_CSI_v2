@@ -9,4 +9,4 @@ __pycache__/
 *.pt
 prompt_init.txt
 outputs/
-data/
+/data/

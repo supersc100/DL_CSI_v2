@@ -1,0 +1,12 @@
+/.vscode
+/.claude
+/models/deepseek-1_5b
+__pycache__/
+*.pyc
+*.h5
+*.log
+*.json
+*.pt
+prompt_init.txt
+outputs/
+data/

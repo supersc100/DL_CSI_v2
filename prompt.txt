@@ -1,0 +1,32 @@
+kimi修正后的研究计划：
+1.	整体项目框架使用pytorch完成。
+
+数据生成阶段
+2.	数据生成使用sionna 2.0版本（注意最新的版本为2.x版本）。上下行信道共享延迟和角度参数，独立采样快衰落，显式参数提取 + 手动重合成 UL/DL 信道，sionna中，2.0版本中，CDL信道的aod aoa 和powers可以分别使用self.cdl_dl._aod ._aoa 和 ._powers得到，tau在cdl的输出中。sionna是基于TensorFlow的，我的模型预期基于pytorch，需要数据格式转换和管道对接。
+3.	输入数据不仅有上行CSI，而是包括历史信息的：上行 CSI + 历史上下行对 + 大尺度参数。历史窗口长度建议取 16~20 个时隙（参考 CSI-4CAST 的设置），历史 CSI 需先经轻量 CNN/Transformer Encoder 压缩为隐向量，再作为"历史 token"输入
+4.	信道数据预处理，重点关注利用角频域，将空间-频域 CSI 转换到 Angle-Delay 域，利用互易性，在角度-延迟（Angle-Delay）域进行处理，因为互易性在角频域更强 。因此实际应对上行CSI沿天线维度做 2D-DFT（或 DFT 码本），沿频率维度做 IFFT 转换到延迟域。DFT/IDFT 使用 PyTorch 原生 torch.fft，确保梯度可反向传播
+5.	设计一个独立的大尺度参数编码器
+
+模型架构设计
+6.	加载预训练的DeepSeek模型和tokenizer（离线），核心模型采用deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B离线模型并冻结参数，通过精确替换embedding层，改造输出层与损失函数，同时使用lora微调参数
+7.	定义新的embedding层，将 CSI/环境特征从局部表示空间映射到 LLM 预训练的语义空间，新 Embedding 层应为连续值投影层：将 CSI 特征向量/补丁通过线性层投影到 LLM 的 hidden_dim
+8.	采用分阶段 warmup 训练：先冻结 LLM 训练 Encoder/Decoder，再解冻 LoRA 做端到端微调
+9.	改造输出层（回归头）
+
+损失函数与训练策略
+10.	定义损失函数，训练采用MSE损失，用于比较预测的下行CSI和真实的下行CSI，验证和测试结果加入归一化MSE（NMSE）和余弦相似度。除标准的 NMSE（归一化均方误差）外，建议增加角度域一致性损失（如角延迟域预测值与真值的 L1 损失），强化大尺度结构的保持
+11.	分阶段训练：
+	a)	Warmup 训练（Encoder/Decoder 对齐）
+	b)	LoRA 微调（端到端）
+12.	损失计算用 float32，仅模型前向用 bfloat16
+13.	训练过程输出使用log记录
+14.	其他函数库版本，我之前使用的torch>=2.11.0，transformers>=5.5.4，accelerate，peft>=0.19.0，sionna>=2.0.1，numpy>=2.4.4，pyyaml，h5py，这一套是可以运行的
+
+基线对比与评估
+基线1：直接复制上行CSI作为预测的下行CSI
+基线2：在角频域做线性插值对比传统方法
+基线3：TDD互易情况下的预测结果为性能上界
+基线4：FDD下直接使用上行csi，没有使用共享大尺度参数的情况下的预测结果（消融实验）
+基线5：FDD下直接使用上行csi+共享大尺度参数，但没有使用历史CSI的预测结果（消融实验）
+
+生成claude.md对整个项目方案及使用方法进行说明

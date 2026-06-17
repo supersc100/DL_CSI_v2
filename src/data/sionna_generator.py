@@ -103,7 +103,7 @@ def _make_resource_grid(config: Any):
         num_tx=1,
         num_streams_per_tx=1,
         cyclic_prefix_length=int(config.data.cyclic_prefix_length),
-        num_guard_subcarriers=[0, 0],
+        num_guard_carriers=[0, 0],
         dc_null=False,
         pilot_pattern="kronecker",
         pilot_ofdm_symbol_indices=[2, 11],
@@ -200,7 +200,7 @@ def _synthesize_cir_from_rays(
     coeffs = np.sqrt(np.abs(powers[:num_rays])) * gains  # [R]
 
     # CIR h[rx, tx, ray]
-    h = np.einsum("r,rx,rt->rxt", coeffs, a_rx, a_tx).astype(np.complex64)
+    h = np.einsum("x,xr,xt->rtx", coeffs, a_rx, a_tx).astype(np.complex64)
     return h, tau[:num_rays], aoa[:num_rays], aod[:num_rays]
 
 
@@ -224,7 +224,7 @@ def _cir_to_frequency_response(
     freqs = subcarrier_indices * subcarrier_spacing  # [M]
     # H(f) = sum_l h_l * exp(-j*2*pi*tau_l*f)
     phase = np.exp(-1j * 2.0 * np.pi * np.outer(tau, freqs))  # [L, M]
-    H = np.einsum("rxt,lm->rxm", h, phase)  # [Rx, Tx, M]
+    H = np.einsum("rtx,lm->rtm", h, phase)  # [Rx, Tx, M]
     return H.astype(np.complex64)
 
 
@@ -297,7 +297,6 @@ def _generate_one_sample(
 
     # --- Downlink channel ---------------------------------------------------
     from sionna.phy.channel.tr38901 import CDL
-    from sionna.phy.channel import OFDMChannel
     cdl_dl = CDL(
         model=cdl_name,
         delay_spread=100e-9,
@@ -308,12 +307,12 @@ def _generate_one_sample(
         min_speed=0.0,
         max_speed=float(rng.uniform(0.0, 3.0)),
     )
-    rg, _ = _make_resource_grid(config)
-    ofdm_dl = OFDMChannel(cdl_dl, rg, normalize_channel=True)
 
-    # Trigger ray generation by calling the channel once; parameters like _aod,
-    # _aoa, and _powers are populated after this call.
-    _ = ofdm_dl(1)
+    # Trigger ray generation by calling the CDL once; parameters like _aod,
+    # _aoa, and _powers are populated after this call. We do not actually use
+    # the OFDMChannel output, so calling the underlying CDL directly avoids
+    # constructing a dummy transmit tensor.
+    _ = cdl_dl(batch_size=1, num_time_steps=1, sampling_frequency=1)
 
     # Extract DL ray parameters.
     ray_params_dl = _extract_ray_params(cdl_dl)

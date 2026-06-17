@@ -137,11 +137,12 @@ def _extract_ray_params(cdl, tau=None) -> Dict[str, np.ndarray]:
     ]:
         value = getattr(cdl, attr, None)
         if value is not None:
-            params[key] = np.array(value)
+            # Sionna may return GPU tensors; move to CPU before numpy conversion.
+            params[key] = np.array(value.cpu() if hasattr(value, "cpu") else value)
 
     if tau is not None:
         # Sionna returns tau as [batch, rx, tx, num_paths]; flatten to 1-D.
-        params["tau"] = np.array(tau).reshape(-1)
+        params["tau"] = np.array(tau.cpu() if hasattr(tau, "cpu") else tau).reshape(-1)
 
     if "tau" not in params:
         # `tau` may only exist after channel generation.

@@ -179,7 +179,7 @@ training:
       mse_weight: 1.0
       angle_delay_l1_weight: 0.1
 
-  lora_finetune:
+  lora:
     epochs: 50
     lr: 1.0e-4
     weight_decay: 1.0e-4

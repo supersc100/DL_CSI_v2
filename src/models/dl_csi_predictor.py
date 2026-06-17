@@ -254,9 +254,11 @@ class DlCsiPredictor(nn.Module):
             self.freeze_llm(True)
             self.freeze_local_encoders(False)
         elif stage == "lora":
-            # Base LLM remains frozen; LoRA adapters are trainable by default.
-            # Do not call freeze_llm(False) here to avoid unfreezing base weights.
+            # Base LLM remains frozen; LoRA adapters must stay trainable.
             self.freeze_llm(True)
+            for name, param in self.llm.named_parameters():
+                if "lora_" in name:
+                    param.requires_grad = True
             self.freeze_local_encoders(False)
         elif stage == "full":
             # Unfreeze everything (optional, rarely used with LLMs).

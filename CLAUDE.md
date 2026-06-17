@@ -115,10 +115,12 @@ pip install -r requirements.txt
 The project expects weights under `./models/deepseek-1_5b`.
 
 ```bash
-# Using HuggingFace CLI (recommended)
-huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --local-dir ./models/deepseek-1_5b \
-    --local-dir-use-symlinks False
+# Install the new HuggingFace CLI dependency
+pip install "httpx[socks]"
+
+# Using the new HuggingFace CLI (hf)
+hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --local-dir ./models/deepseek-1_5b
 
 # Or use git-lfs (requires git-lfs installed)
 git lfs install

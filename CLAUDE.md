@@ -137,6 +137,32 @@ python scripts/sanity_check.py --config config.yaml --skip-llm
 
 If the script prints `Shape check passed.`, the encoder/projection/head dimensions are consistent.
 
+### 4.4 Training Smoke Test (No Weights/Data Required)
+
+Before downloading the full LLM or generating real Sionna data, you can run a fast end-to-end training smoke test that uses in-memory dummy data and a tiny random transformer in place of the 1.5B backbone:
+
+```bash
+python scripts/train_smoke_test.py --config config.yaml
+```
+
+This script:
+
+- skips loading the real DeepSeek/Qwen weights,
+- creates small in-memory dummy CSI tensors,
+- shrinks model dims (`feature_dim=128`, `llm_hidden_dim=128`, smaller CNNs),
+- runs 2 epochs of warmup training on the CPU,
+- verifies that the full loop (data → model → loss → backward → optimizer → checkpoint) completes without NaN/inf.
+
+If it prints `Training smoke test passed.`, the training pipeline is ready. You can then proceed to download weights and generate real data.
+
+You can adjust the smoke-test scale with:
+
+```bash
+python scripts/train_smoke_test.py --config config.yaml --samples 32 --batch-size 8 --epochs 3
+```
+
+> **Note:** Passing the smoke test does not guarantee convergence on real data; it only verifies that the code runs end-to-end.
+
 ---
 
 ## 5. Data Generation
@@ -183,6 +209,8 @@ This writes `data/processed/test_tdd_oracle.h5`, where UL and DL share identical
 ## 6. Training
 
 Training is split into two stages. Adjust `config.yaml` before running.
+
+> **Tip:** Before starting real training, run the fast smoke test in [4.4](#44-training-smoke-test-no-weightsdata-required) to verify the full training loop without downloading weights or generating data.
 
 ### 6.1 Stage 1: Warmup (Encoders + Regression Head)
 

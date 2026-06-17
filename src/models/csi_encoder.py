@@ -46,7 +46,16 @@ class CsiEncoder(nn.Module):
                 num_groups = min(8, out_channels)
                 layers.append(nn.GroupNorm(num_groups=num_groups, num_channels=out_channels))
             layers.append(nn.GELU())
-            layers.append(nn.MaxPool3d(kernel_size=2, stride=2, padding=0))
+            # For the last layer, avoid pooling the UE-antenna (N_rx) dimension
+            # so that small UE arrays (e.g. 8) do not collapse to size 0 after
+            # repeated halving. The BS-angle (N_tx) and subcarrier (M) dims
+            # are still pooled normally.
+            if i == num_layers - 1:
+                layers.append(
+                    nn.MaxPool3d(kernel_size=(2, 1, 2), stride=(2, 1, 2), padding=0)
+                )
+            else:
+                layers.append(nn.MaxPool3d(kernel_size=2, stride=2, padding=0))
             layers.append(nn.Dropout3d(dropout))
             channels = out_channels
 

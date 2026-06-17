@@ -59,7 +59,7 @@ class DlCsiPredictor(nn.Module):
         - pred_dl_ad:     [B, N_tx, N_rx, M] (complex)
     """
 
-    def __init__(self, config):
+    def __init__(self, config, llm: Optional[nn.Module] = None):
         super().__init__()
         self.config = config
         self.feature_dim = int(config.model.feature_dim)
@@ -116,8 +116,8 @@ class DlCsiPredictor(nn.Module):
             num_virtual_tokens=self.num_virtual_tokens,
         )
 
-        # DeepSeek / Qwen backbone.
-        self.llm = self._build_llm(config)
+        # DeepSeek / Qwen backbone, or a caller-supplied LLM (e.g. for smoke tests).
+        self.llm = llm if llm is not None else self._build_llm(config)
         self.tokenizer = None  # loaded lazily in inference scripts if needed.
 
         # Output head.
@@ -190,10 +190,12 @@ class DlCsiPredictor(nn.Module):
         history_dl_ad: torch.Tensor,
         large_scale: torch.Tensor,
     ) -> torch.Tensor:
-        # Convert complex CSI to real-channel representation: [B, 2, N_tx, N_rx, M].
+        # Convert complex CSI to real-channel representation.
+        # current: [B, N_tx, N_rx, M] -> [B, 2, N_tx, N_rx, M]
+        # history: [B, T, N_tx, N_rx, M] -> [B, 2, T, N_tx, N_rx, M] -> [B, T, 2, N_tx, N_rx, M]
         current_ul_ri = complex_to_real_channels(current_ul_ad)
-        history_ul_ri = complex_to_real_channels(history_ul_ad)
-        history_dl_ri = complex_to_real_channels(history_dl_ad)
+        history_ul_ri = complex_to_real_channels(history_ul_ad).permute(0, 2, 1, 3, 4, 5)
+        history_dl_ri = complex_to_real_channels(history_dl_ad).permute(0, 2, 1, 3, 4, 5)
 
         # Encode each modality.
         current_feat = self.csi_encoder(current_ul_ri)  # [B, feature_dim]

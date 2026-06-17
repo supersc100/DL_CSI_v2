@@ -53,11 +53,11 @@ def main():
     M = int(config.data.num_subcarriers)
     num_ls = int(config.model.env_encoder.input_dim)
 
-    model = DlCsiPredictor(config)
-
     if args.skip_llm or not os.path.isdir(str(config.model.llm_path)):
         print("Substituting LLM with dummy transformer for shape check.")
-        model.llm = DummyLLM(int(config.model.llm_hidden_dim))
+        model = DlCsiPredictor(config, llm=DummyLLM(int(config.model.llm_hidden_dim)))
+    else:
+        model = DlCsiPredictor(config)
 
     current_ul_ad = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
     history_ul_ad = torch.randn(B, T, N_tx, N_rx, M, dtype=torch.complex64)

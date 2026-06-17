@@ -96,7 +96,7 @@ model:
   csi_encoder:
     in_channels: 2         # real & imag concatenated as channels
     base_channels: 64
-    num_layers: 4
+    num_layers: 4          # 4 layers; last layer skips pooling on N_rx to avoid collapse
     kernel_size: 3
     use_bn: false          # LayerNorm preferred for regression
     dropout: 0.1

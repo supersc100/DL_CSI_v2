@@ -114,11 +114,17 @@ def _make_resource_grid(config: Any):
 # ---------------------------------------------------------------------------
 # Ray extraction and manual channel synthesis
 # ---------------------------------------------------------------------------
-def _extract_ray_params(cdl) -> Dict[str, np.ndarray]:
+def _extract_ray_params(cdl, tau=None) -> Dict[str, np.ndarray]:
     """Extract large-scale ray parameters from a Sionna CDL object.
 
     Sionna 2.0 stores ray geometry as private attributes; names may shift
     between minor releases. We try the documented ones and warn on failure.
+
+    Args:
+        cdl: Sionna CDL object.
+        tau: Optional path delays returned by ``cdl(...)``. Some Sionna
+            versions expose delays only through this return value, not as
+            an object attribute.
     """
     params: Dict[str, np.ndarray] = {}
     for attr, key in [
@@ -132,6 +138,11 @@ def _extract_ray_params(cdl) -> Dict[str, np.ndarray]:
         value = getattr(cdl, attr, None)
         if value is not None:
             params[key] = np.array(value)
+
+    if tau is not None:
+        # Sionna returns tau as [batch, rx, tx, num_paths]; flatten to 1-D.
+        params["tau"] = np.array(tau).reshape(-1)
+
     if "tau" not in params:
         # `tau` may only exist after channel generation.
         params["tau"] = np.array([])
@@ -310,12 +321,14 @@ def _generate_one_sample(
 
     # Trigger ray generation by calling the CDL once; parameters like _aod,
     # _aoa, and _powers are populated after this call. We do not actually use
-    # the OFDMChannel output, so calling the underlying CDL directly avoids
-    # constructing a dummy transmit tensor.
-    _ = cdl_dl(batch_size=1, num_time_steps=1, sampling_frequency=1)
+    # the path coefficients, but we capture the returned path delays `tau`
+    # because Sionna 2.x exposes them through the call return value, not as a
+    # CDL attribute.
+    sampling_frequency = float(config.data.bandwidth)
+    _, tau = cdl_dl(batch_size=1, num_time_steps=1, sampling_frequency=sampling_frequency)
 
     # Extract DL ray parameters.
-    ray_params_dl = _extract_ray_params(cdl_dl)
+    ray_params_dl = _extract_ray_params(cdl_dl, tau=tau)
 
     # Manually synthesize DL frequency response from extracted rays.
     h_cir_dl, tau_dl, aoa_dl, aod_dl = _synthesize_cir_from_rays(

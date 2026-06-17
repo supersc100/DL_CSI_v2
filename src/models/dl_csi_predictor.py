@@ -223,6 +223,11 @@ class DlCsiPredictor(nn.Module):
             current_ul_ad, history_ul_ad, history_dl_ad, large_scale
         )
 
+        # Align continuous embeddings with LLM dtype (e.g. bfloat16) before forward.
+        # Dummy / smoke-test backbones may not expose .dtype, so fall back to input dtype.
+        llm_dtype = getattr(self.llm, "dtype", inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.to(llm_dtype)
+
         # Forward through LLM backbone (frozen + LoRA adapters).
         outputs = self.llm(
             inputs_embeds=inputs_embeds,
@@ -234,8 +239,8 @@ class DlCsiPredictor(nn.Module):
         last_hidden = outputs.hidden_states[-1]  # [B, 3, llm_hidden_dim]
         pooled = last_hidden.mean(dim=1)  # [B, llm_hidden_dim]
 
-        # Predict downlink CSI in angle-delay domain.
-        pred_dl_ad = self.regression_head(pooled, target_shape=(-1, *self.csi_shape))
+        # Predict downlink CSI in angle-delay domain (keep float32 for regression head / loss).
+        pred_dl_ad = self.regression_head(pooled.float(), target_shape=(-1, *self.csi_shape))
         return pred_dl_ad
 
     def freeze_local_encoders(self, freeze: bool = True) -> None:

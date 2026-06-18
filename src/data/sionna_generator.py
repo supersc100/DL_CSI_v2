@@ -620,10 +620,15 @@ def _merge_h5_chunks(output_path: str, chunk_paths: List[str], total_samples: in
                 datasets["large_scale"][sl] = fc["large_scale"][...]
 
                 if save_ray_info:
-                    datasets["tau"][sl] = fc["tau"][...]
-                    datasets["aoa"][sl] = fc["aoa"][...]
-                    datasets["aod"][sl] = fc["aod"][...]
-                    datasets["powers"][sl] = fc["powers"][...]
+                    # Variable-length datasets must be copied element-by-element;
+                    # reading them with [...] can return a 2-D array when all
+                    # rows share the same length, which cannot be broadcast back
+                    # into a 1-D vlen dataset.
+                    for j in range(n):
+                        datasets["tau"][offset + j] = fc["tau"][j]
+                        datasets["aoa"][offset + j] = fc["aoa"][j]
+                        datasets["aod"][offset + j] = fc["aod"][j]
+                        datasets["powers"][offset + j] = fc["powers"][j]
 
                 offset += n
 

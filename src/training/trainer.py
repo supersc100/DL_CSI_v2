@@ -31,6 +31,10 @@ class Trainer:
         self.device = torch.device(str(config.project.device))
         self.logger = logger or Logger(str(config.project.log_dir))
 
+        # Move model to target device. The LLM was already placed via device_map;
+        # this mainly ensures local encoders/projection/head are colocated with inputs.
+        self.model.to(self.device)
+
         # Stage-specific training config.
         self.stage_cfg = getattr(config.training, stage)
         self.model.set_trainable(stage)

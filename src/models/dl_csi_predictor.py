@@ -137,6 +137,20 @@ class DlCsiPredictor(nn.Module):
             dropout=float(config.model.regression_head.dropout),
         )
 
+        # Align local encoders with the LLM / AMP dtype. The regression head is
+        # intentionally left in float32 for stable loss computation.
+        if bool(config.project.mixed_precision):
+            amp_dtype = torch.bfloat16
+            for module in (
+                self.csi_encoder,
+                self.temporal_encoder,
+                self.env_encoder,
+                self.fusion,
+                self.embedding_projection,
+            ):
+                if module is not None:
+                    module.to(amp_dtype)
+
     def _build_llm(self, config) -> nn.Module:
         llm_path = str(config.model.llm_path)
         if not os.path.isabs(llm_path):

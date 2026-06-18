@@ -10,7 +10,9 @@ Generation idea:
 - We extract ray parameters from a DL CDL realization, then synthesize the UL
   channel by reusing those parameters but resampling the fast-fading gains.
 """
+import multiprocessing as mp
 import os
+import shutil
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -491,6 +493,207 @@ def generate_dataset(
 
             if (i + 1) % batch_size == 0 or i == num_samples - 1:
                 print(f"Generated {i + 1}/{num_samples} samples for {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# Multiprocessing generation helpers
+# ---------------------------------------------------------------------------
+def _create_datasets_in_file(
+    f: h5py.File,
+    num_samples: int,
+    num_tx: int,
+    num_rx: int,
+    num_subcarriers: int,
+    history_window: int,
+    num_ls: int,
+    save_ray_info: bool,
+) -> Dict[str, h5py.Dataset]:
+    """Create standard CSI datasets in an open H5 file."""
+    datasets: Dict[str, h5py.Dataset] = {
+        "h_ul": f.create_dataset(
+            "h_ul", shape=(num_samples, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, num_tx, num_rx, num_subcarriers)
+        ),
+        "h_dl": f.create_dataset(
+            "h_dl", shape=(num_samples, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, num_tx, num_rx, num_subcarriers)
+        ),
+        "history_ul": f.create_dataset(
+            "history_ul", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
+        ),
+        "history_dl": f.create_dataset(
+            "history_dl", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
+        ),
+        "large_scale": f.create_dataset(
+            "large_scale", shape=(num_samples, num_ls), dtype=np.float32
+        ),
+    }
+    if save_ray_info:
+        datasets["tau"] = f.create_dataset("tau", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
+        datasets["aoa"] = f.create_dataset("aoa", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
+        datasets["aod"] = f.create_dataset("aod", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
+        datasets["powers"] = f.create_dataset("powers", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
+    return datasets
+
+
+def _generate_chunk(args: Tuple[Any, int, int, str, int, bool]) -> str:
+    """Worker entry point: generate one contiguous chunk and write to its own H5.
+
+    Args:
+        args: (config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul)
+
+    Returns:
+        Path to the generated chunk file.
+    """
+    config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul = args
+    if chunk_size <= 0:
+        return chunk_path
+
+    os.makedirs(os.path.dirname(chunk_path), exist_ok=True)
+    # Use a unique seed per chunk so different workers do not produce identical sequences.
+    rng = np.random.default_rng(int(config.project.seed) + seed_offset + chunk_start)
+
+    num_subcarriers = int(config.data.num_subcarriers)
+    num_tx = int(config.data.bs_array.num_elements)
+    num_rx = int(config.data.ue_array.num_elements)
+    history_window = int(config.data.history_window)
+    num_ls = len(config.data.large_scale_params)
+    batch_size = int(config.data.batch_size_per_file)
+    save_ray_info = bool(config.data.save_ray_info)
+
+    with h5py.File(chunk_path, "w") as f:
+        datasets = _create_datasets_in_file(
+            f, chunk_size, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info
+        )
+        for i in range(chunk_size):
+            sample = _generate_one_sample(config, rng, synthesize_ul=synthesize_ul)
+            if sample is None:
+                warnings.warn(f"Chunk {chunk_start}: sample {i} generation failed; skipping.")
+                continue
+
+            datasets["h_ul"][i] = sample["h_ul"]
+            datasets["h_dl"][i] = sample["h_dl"]
+            datasets["history_ul"][i] = sample["history_ul"]
+            datasets["history_dl"][i] = sample["history_dl"]
+            datasets["large_scale"][i] = sample["large_scale"]
+
+            if save_ray_info:
+                datasets["tau"][i] = sample["tau"]
+                datasets["aoa"][i] = sample["aoa"]
+                datasets["aod"][i] = sample["aod"]
+                datasets["powers"][i] = sample["powers"]
+
+            if (i + 1) % batch_size == 0 or i == chunk_size - 1:
+                print(f"Chunk {chunk_start}: generated {i + 1}/{chunk_size} samples")
+
+    return chunk_path
+
+
+def _merge_h5_chunks(output_path: str, chunk_paths: List[str], total_samples: int, config: Any) -> None:
+    """Merge per-worker chunk H5 files into a single final H5 file."""
+    num_subcarriers = int(config.data.num_subcarriers)
+    num_tx = int(config.data.bs_array.num_elements)
+    num_rx = int(config.data.ue_array.num_elements)
+    history_window = int(config.data.history_window)
+    num_ls = len(config.data.large_scale_params)
+    save_ray_info = bool(config.data.save_ray_info)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with h5py.File(output_path, "w") as f:
+        datasets = _create_datasets_in_file(
+            f, total_samples, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info
+        )
+
+        offset = 0
+        for chunk_path in chunk_paths:
+            with h5py.File(chunk_path, "r") as fc:
+                n = fc["h_ul"].shape[0]
+                if n == 0:
+                    continue
+                sl = slice(offset, offset + n)
+                datasets["h_ul"][sl] = fc["h_ul"][...]
+                datasets["h_dl"][sl] = fc["h_dl"][...]
+                datasets["history_ul"][sl] = fc["history_ul"][...]
+                datasets["history_dl"][sl] = fc["history_dl"][...]
+                datasets["large_scale"][sl] = fc["large_scale"][...]
+
+                if save_ray_info:
+                    datasets["tau"][sl] = fc["tau"][...]
+                    datasets["aoa"][sl] = fc["aoa"][...]
+                    datasets["aod"][sl] = fc["aod"][...]
+                    datasets["powers"][sl] = fc["powers"][...]
+
+                offset += n
+
+    if offset != total_samples:
+        warnings.warn(f"Merged {offset} samples, expected {total_samples}.")
+
+
+def generate_dataset_mp(
+    config: Any,
+    num_samples: int,
+    output_path: str,
+    seed_offset: int = 0,
+    synthesize_ul: bool = True,
+    num_workers: Optional[int] = None,
+) -> None:
+    """Generate an H5 dataset using multiple processes.
+
+    Splits `num_samples` into contiguous chunks, generates each chunk in a
+    separate worker process, then merges the chunk files into `output_path`.
+    Uses ``multiprocessing.spawn`` to avoid TensorFlow/Sionna fork issues.
+
+    If ``num_workers`` is 1 or the loaded config value is <= 1, falls back to
+    the single-process :func:`generate_dataset`.
+    """
+    if num_workers is None:
+        num_workers = int(getattr(config.data, "num_workers", 0))
+    num_workers = max(1, num_workers)
+
+    if num_workers == 1 or num_samples <= 1:
+        generate_dataset(config, num_samples, output_path, seed_offset, synthesize_ul)
+        return
+
+    # Cap workers by sample count to avoid empty chunks.
+    num_workers = min(num_workers, num_samples)
+
+    # Use spawn context: Sionna/TensorFlow do not tolerate fork() well.
+    ctx = mp.get_context("spawn")
+
+    base, ext = os.path.splitext(output_path)
+    chunk_dir = f"{base}_chunks"
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    chunk_size_base = num_samples // num_workers
+    remainder = num_samples % num_workers
+
+    chunk_paths: List[str] = []
+    pool_args: List[Tuple[Any, int, int, str, int, bool]] = []
+    start = 0
+    for i in range(num_workers):
+        size = chunk_size_base + (1 if i < remainder else 0)
+        if size == 0:
+            continue
+        chunk_path = os.path.join(chunk_dir, f"chunk_{i:04d}{ext}")
+        chunk_paths.append(chunk_path)
+        pool_args.append((config, start, size, chunk_path, seed_offset, synthesize_ul))
+        start += size
+
+    print(f"Generating {num_samples} samples with {len(pool_args)} workers ...")
+    try:
+        with ctx.Pool(processes=len(pool_args)) as pool:
+            completed_paths = pool.map(_generate_chunk, pool_args)
+    except Exception as exc:
+        warnings.warn(f"Multiprocessing generation failed: {exc}. Chunk files left in {chunk_dir} for inspection.")
+        raise
+
+    print(f"Merging {len(completed_paths)} chunks into {output_path} ...")
+    _merge_h5_chunks(output_path, completed_paths, num_samples, config)
+
+    shutil.rmtree(chunk_dir)
+    print(f"Saved merged dataset to {output_path}")
 
 
 if __name__ == "__main__":

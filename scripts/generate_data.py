@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import load_config
-from src.data.sionna_generator import generate_dataset
+from src.data.sionna_generator import generate_dataset, generate_dataset_mp
 
 
 def main():
@@ -44,13 +44,27 @@ def main():
             output_path = f"{base}{tag}{ext}"
 
         print(f"Generating {num_samples} samples for split={split}{tag} ...")
-        generate_dataset(
-            config,
-            num_samples=num_samples,
-            output_path=output_path,
-            seed_offset={"train": 0, "val": 1000000, "test": 2000000}[split],
-            synthesize_ul=not oracle,
-        )
+        seed_offset = {"train": 0, "val": 1000000, "test": 2000000}[split]
+
+        # Use multiprocessing when data.num_workers > 1.
+        num_workers = int(getattr(config.data, "num_workers", 0))
+        if num_workers > 1:
+            generate_dataset_mp(
+                config,
+                num_samples=num_samples,
+                output_path=output_path,
+                seed_offset=seed_offset,
+                synthesize_ul=not oracle,
+                num_workers=num_workers,
+            )
+        else:
+            generate_dataset(
+                config,
+                num_samples=num_samples,
+                output_path=output_path,
+                seed_offset=seed_offset,
+                synthesize_ul=not oracle,
+            )
         print(f"Saved to {output_path}")
 
 

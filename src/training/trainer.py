@@ -31,9 +31,19 @@ class Trainer:
         self.device = torch.device(str(config.project.device))
         self.logger = logger or Logger(str(config.project.log_dir))
 
-        # Move model to target device. The LLM was already placed via device_map;
-        # this mainly ensures local encoders/projection/head are colocated with inputs.
-        self.model.to(self.device)
+        # Move local modules to target device. The LLM was already placed via
+        # device_map; calling .to() on the whole model can be intercepted by
+        # accelerate hooks, so we move the non-LLM submodules individually.
+        for module in (
+            self.model.csi_encoder,
+            self.model.temporal_encoder,
+            self.model.env_encoder,
+            self.model.fusion,
+            self.model.embedding_projection,
+            self.model.regression_head,
+        ):
+            if module is not None:
+                module.to(self.device)
 
         # Stage-specific training config.
         self.stage_cfg = getattr(config.training, stage)

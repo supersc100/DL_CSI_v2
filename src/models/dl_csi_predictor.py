@@ -254,7 +254,9 @@ class DlCsiPredictor(nn.Module):
         pooled = last_hidden.mean(dim=1)  # [B, llm_hidden_dim]
 
         # Predict downlink CSI in angle-delay domain (keep float32 for regression head / loss).
-        pred_dl_ad = self.regression_head(pooled.float(), target_shape=(-1, *self.csi_shape))
+        # Disable autocast around the head so view_as_complex receives float32 tensors.
+        with torch.amp.autocast('cuda', enabled=False):
+            pred_dl_ad = self.regression_head(pooled.float(), target_shape=(-1, *self.csi_shape))
         return pred_dl_ad
 
     def freeze_local_encoders(self, freeze: bool = True) -> None:

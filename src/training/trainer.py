@@ -4,7 +4,8 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
@@ -109,7 +110,7 @@ class Trainer:
                 if is_training:
                     self.optimizer.zero_grad()
 
-                with autocast(enabled=self.use_amp, dtype=torch.bfloat16):
+                with autocast("cuda", enabled=self.use_amp, dtype=torch.bfloat16):
                     pred_dl_ad = self.model(
                         current_ul_ad, history_ul_ad, history_dl_ad, large_scale
                     )

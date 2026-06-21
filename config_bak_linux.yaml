@@ -7,8 +7,8 @@
 project:
   name: "DL_CSI_v2"
   seed: 42
-  device: "auto"          # "auto" | "cuda" | "cpu"
-  mixed_precision: true   # use torch.autocast(bfloat16) for forward pass
+  device: "cuda"            # 固定 CUDA
+  mixed_precision: true     # 4090 支持 bf16
   output_dir: "./outputs"
   log_dir: "./outputs/logs"
   checkpoint_dir: "./outputs/checkpoints"
@@ -37,17 +37,17 @@ data:
   # Antenna arrays
   bs_array:
     type: "ULA"            # ULA only in this release
-    num_elements: 64       # 32 or 64
+    num_elements: 32       # 32 or 64
     polarization: "single" # single | cross
     spacing: 0.5           # in wavelengths
   ue_array:
     type: "ULA"
-    num_elements: 8        # 4 or 8
+    num_elements: 4        # 4 or 8
     polarization: "single"
     spacing: 0.5
 
   # OFDM / channel grid
-  num_subcarriers: 64      # M = 64 or 128
+  num_subcarriers: 32      # M = 64 or 128
   num_slots: 17            # T_history + 1 current slot
   history_window: 16       # T = 16 historical slots
   samples:
@@ -65,7 +65,7 @@ data:
     - "bs_ue_distance"      # distance dependent path loss info
 
   # Generation control
-  batch_size_per_file: 256 # how many samples to accumulate before flushing to H5
+  batch_size_per_file: 512 # how many samples to accumulate before flushing to H5
   num_workers: 4           # parallel generation workers (set 0 if TF/Sionna unstable)
   save_ray_info: true      # keep aod/aoa/tau/powers arrays in H5 for debug
 
@@ -148,12 +148,12 @@ model:
 # Training (single-stage, end-to-end)
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 1
-  num_workers: 4
+  batch_size: 48
+  num_workers: 8
   pin_memory: true
   gradient_clip: 1.0
 
-  epochs: 2
+  epochs: 50
   lr: 1.0e-3
   weight_decay: 1.0e-4
   optimizer: "adamw"
@@ -177,7 +177,7 @@ training:
 # Evaluation
 # -----------------------------------------------------------------------------
 evaluation:
-  batch_size: 32
+  batch_size: 64
   metrics:
     - "nmse"
     - "cosine_similarity"

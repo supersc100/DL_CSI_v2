@@ -1,7 +1,7 @@
-# DL-CSI-v2: FDD Downlink CSI Prediction with DeepSeek-LLM + LoRA
+# DL-CSI-v2: FDD Downlink CSI Prediction with CNN + Transformer
 
 This repository implements the first stage of the research project **"Deep Learning-based Channel State Information Feedback for Massive MIMO"**:
-predicting FDD downlink CSI from uplink CSI using a frozen DeepSeek-R1-Distill-Qwen-1.5B backbone, continuous-value input embeddings, LoRA adapters, and dedicated CSI encoders.
+predicting FDD downlink CSI from uplink CSI using dedicated CSI encoders, a lightweight Transformer fusion block, and a regression head. All components are trained end-to-end in a single stage.
 
 ---
 
@@ -34,24 +34,23 @@ DL_CSI_v2/
 │   │   ├── csi_encoder.py             # CNN encoder for current UL CSI
 │   │   ├── temporal_encoder.py        # Transformer over historical UL/DL pairs
 │   │   ├── env_encoder.py             # MLP for large-scale parameters
-│   │   ├── embedding_projection.py    # continuous feature -> LLM hidden space
+│   │   ├── transformer_fusion.py      # lightweight Transformer over modality tokens
 │   │   ├── regression_head.py         # MLP head to predict DL CSI
-│   │   └── dl_csi_predictor.py        # end-to-end model (encoders + LLM + LoRA + head)
+│   │   └── dl_csi_predictor.py        # end-to-end model (encoders + fusion + head)
 │   ├── training/
 │   │   ├── losses.py                  # MSE + angle-delay L1 loss
-│   │   └── trainer.py                 # generic warmup / LoRA trainer
+│   │   └── trainer.py                 # single-stage trainer
 │   └── utils/
 │       ├── logging.py                 # file + TensorBoard logger
 │       ├── metrics.py                 # NMSE (dB) and cosine similarity
 │       └── baselines.py               # baseline methods
 ├── scripts/
 │   ├── generate_data.py               # generate train/val/test H5 files
-│   ├── train_warmup.py                # stage 1: train encoders + head
-│   ├── train_lora.py                  # stage 2: LoRA end-to-end fine-tuning
-│   ├── train_full.py                  # optional stage 3: full / projection-only finetune
+│   ├── train.py                       # single-stage end-to-end training
+│   ├── train_smoke_test.py            # fast smoke test without real data
 │   ├── evaluate.py                    # test-set evaluation
 │   ├── run_baselines.py               # run baseline comparisons
-│   └── sanity_check.py                # shape sanity check without real weights/data
+│   └── sanity_check.py                # shape sanity check without real data
 └── tests/
     └── test_transforms.py             # unit tests for FFT transforms
 ```
@@ -71,9 +70,8 @@ Input
     └── Environment Encoder (MLP + SiLU)       -->  env token [D]
 
         Cross-attention fusion / concat        -->  [B, 3, D]
-        Continuous Embedding Projection        -->  [B, 3, H_llm]
-        DeepSeek-R1-Distill-Qwen-1.5B (frozen)
-        LoRA adapters (Q/K/V/FFN)
+        TransformerFusion (small Transformer)  -->  [B, 3, H]
+        Mean pool                              -->  [B, H]
         Regression Head (MLP)                  -->  predicted DL CSI (Angle-Delay)
         Inverse FFT                            -->  spatial-frequency DL CSI
 ```
@@ -81,8 +79,9 @@ Input
 ### 3.1 Key Design Decisions
 
 - **Angle-Delay domain**: DFT along the BS antenna dimension and IFFT along subcarriers using `torch.fft`, so gradients back-propagate through the transform.
-- **Continuous embeddings**: the LLM's token embedding is bypassed by feeding `inputs_embeds` directly. A learned `Linear(feature_dim -> llm_hidden_dim)` projects local CSI features into the LLM's semantic space.
-- **Frozen LLM + LoRA**: the entire DeepSeek/Qwen backbone is frozen; only LoRA matrices in Q/K/V/FFN are trainable during stage 2.
+- **CNN encoders**: 3D convolutions extract local structure from angle-delay CSI tensors; a lightweight Transformer aggregates historical slots.
+- **Transformer fusion**: a small domain-specific Transformer (not a pre-trained LLM) models interactions among the three modality tokens `[current_ul, temporal, env]`.
+- **End-to-end single-stage training**: all components are trainable from the start; no staged freezing or adapter tuning is required.
 - **Loss**: complex MSE in angle-delay domain plus an L1 magnitude consistency loss to preserve large-scale structure.
 - **Numerics**: model forward uses `bfloat16`; loss computation is always `float32`.
 
@@ -100,9 +99,6 @@ conda activate dl_csi
 # Install PyTorch with CUDA 12.4 (adjust index-url to your CUDA version)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# Install LLM stack
-pip install transformers>=5.5.4 peft>=0.19.0 accelerate bitsandbytes
-
 # Install Sionna / TensorFlow stack
 pip install tensorflow>=2.18.0 sionna>=2.0.1
 
@@ -110,38 +106,19 @@ pip install tensorflow>=2.18.0 sionna>=2.0.1
 pip install -r requirements.txt
 ```
 
-### 4.2 Download DeepSeek Weights (Offline)
+### 4.2 Sanity Check (No Data Required)
 
-The project expects weights under `./models/deepseek-1_5b`.
-
-```bash
-# Install the new HuggingFace CLI dependency
-pip install "httpx[socks]"
-
-# Using the new HuggingFace CLI (hf)
-hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --local-dir ./models/deepseek-1_5b
-
-# Or use git-lfs (requires git-lfs installed)
-git lfs install
-git clone https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B ./models/deepseek-1_5b
-```
-
-Verify the directory contains `config.json`, `model.safetensors`, `tokenizer.json`, etc.
-
-### 4.3 Sanity Check (No Weights/Data Required)
-
-Before downloading the full LLM or generating data, verify that the model shapes are correct with a tiny dummy backbone:
+Before generating data, verify that the model shapes are correct with dummy inputs:
 
 ```bash
-python scripts/sanity_check.py --config config.yaml --skip-llm
+python scripts/sanity_check.py --config config.yaml
 ```
 
-If the script prints `Shape check passed.`, the encoder/projection/head dimensions are consistent.
+If the script prints `Shape check passed.`, the encoder/fusion/head dimensions are consistent.
 
-### 4.4 Training Smoke Test (No Weights/Data Required)
+### 4.3 Training Smoke Test (No Data Required)
 
-Before downloading the full LLM or generating real Sionna data, you can run a fast end-to-end training smoke test that uses in-memory dummy data and a tiny random transformer in place of the 1.5B backbone:
+Before generating real Sionna data, run a fast end-to-end training smoke test that uses in-memory dummy data and shrunk model dims:
 
 ```bash
 python scripts/train_smoke_test.py --config config.yaml
@@ -149,13 +126,12 @@ python scripts/train_smoke_test.py --config config.yaml
 
 This script:
 
-- skips loading the real DeepSeek/Qwen weights,
 - creates small in-memory dummy CSI tensors,
-- shrinks model dims (`feature_dim=128`, `llm_hidden_dim=128`, smaller CNNs),
-- runs 2 epochs of warmup training on the CPU,
+- shrinks model dims (`feature_dim=128`, `hidden_dim=128`, smaller CNNs),
+- runs 2 epochs of training on the CPU,
 - verifies that the full loop (data → model → loss → backward → optimizer → checkpoint) completes without NaN/inf.
 
-If it prints `Training smoke test passed.`, the training pipeline is ready. You can then proceed to download weights and generate real data.
+If it prints `Training smoke test passed.`, the training pipeline is ready. You can then proceed to generate real data.
 
 You can adjust the smoke-test scale with:
 
@@ -210,55 +186,27 @@ This writes `data/processed/test_tdd_oracle.h5`, where UL and DL share identical
 
 ## 6. Training
 
-Training is split into two stages. Adjust `config.yaml` before running.
+Training is single-stage and end-to-end. Adjust `config.yaml` before running.
 
-> **Tip:** Before starting real training, run the fast smoke test in [4.4](#44-training-smoke-test-no-weightsdata-required) to verify the full training loop without downloading weights or generating data.
+> **Tip:** Before starting real training, run the fast smoke test in [4.3](#43-training-smoke-test-no-data-required) to verify the full training loop without generating data.
 
-### 6.1 Stage 1: Warmup (Encoders + Regression Head)
-
-```bash
-python scripts/train_warmup.py --config config.yaml
-```
-
-- The LLM and LoRA adapters are frozen.
-- Only `CsiEncoder`, `TemporalEncoder`, `EnvironmentEncoder`, `ContinuousEmbeddingProjection`, and `RegressionHead` are trained.
-- Best checkpoint is saved to `outputs/checkpoints/best_warmup.pt`.
-
-### 6.2 Stage 2: LoRA End-to-End Fine-Tuning
+### 6.1 End-to-End Training
 
 ```bash
-python scripts/train_lora.py \
-    --config config.yaml \
-    --warmup-checkpoint outputs/checkpoints/best_warmup.pt
+python scripts/train.py --config config.yaml
 ```
 
-- Base LLM weights stay frozen; LoRA adapters become trainable.
-- Local encoders remain trainable so the whole pipeline can co-adapt.
-- Best checkpoint is saved to `outputs/checkpoints/best_lora.pt`.
+- All model components are trainable.
+- Best checkpoint is saved to `outputs/checkpoints/best.pt`.
+- Periodic checkpoints are saved to `outputs/checkpoints/epoch{epoch}.pt`.
 
-### 6.3 Optional Stage 3: Full Fine-Tuning
+### 6.2 Resume Training
 
-Use this only if you have enough GPU memory. Enable in `config.yaml`:
-
-```yaml
-training:
-  full_finetune:
-    enabled: true
-    epochs: 10
-    lr: 5.0e-6
-```
-
-Then run:
+`train.py` supports `--resume <checkpoint.pt>`:
 
 ```bash
-python scripts/train_full.py \
-    --config config.yaml \
-    --lora-checkpoint outputs/checkpoints/best_lora.pt
+python scripts/train.py --config config.yaml --resume outputs/checkpoints/epoch5.pt
 ```
-
-### 6.4 Resume Training
-
-Both `train_warmup.py` and `train_lora.py` support `--resume <checkpoint.pt>`.
 
 ---
 
@@ -269,7 +217,7 @@ Both `train_warmup.py` and `train_lora.py` support `--resume <checkpoint.pt>`.
 ```bash
 python scripts/evaluate.py \
     --config config.yaml \
-    --checkpoint outputs/checkpoints/best_lora.pt \
+    --checkpoint outputs/checkpoints/best.pt \
     --split test
 ```
 
@@ -310,17 +258,15 @@ All hyperparameters live in `config.yaml`. Key sections:
 | `project` | seed, device, mixed precision, output directories |
 | `data` | scenario, carrier frequencies, antenna arrays, subcarriers, samples |
 | `preprocess` | normalization, angle-delay transform options |
-| `model` | encoder dims, LLM path, fusion, regression head |
-| `lora` | rank, alpha, target modules, dropout |
-| `training` | warmup / LoRA / full-finetune schedules, loss weights, early stopping |
+| `model` | encoder dims, fusion, Transformer fusion, regression head |
+| `training` | epochs, optimizer, scheduler, loss weights, early stopping |
 | `evaluation` | test batch size, metrics, baseline list |
 
 Before first run, update at least:
 
 - `data.h5_train/val/test` paths (if you move them),
-- `model.llm_path` (should point to `./models/deepseek-1_5b` or your offline weights),
 - `model.env_encoder.input_dim` to match `data.large_scale_params` length,
-- GPU memory-dependent settings: `training.batch_size`, `lora.r`.
+- GPU memory-dependent settings: `training.batch_size`, `model.regression_head.hidden_dim`.
 
 ---
 
@@ -339,14 +285,14 @@ Before first run, update at least:
 
 1. Implement the module in `src/models/`.
 2. Import and instantiate it in `src/models/dl_csi_predictor.py`.
-3. Add its output to `_prepare_inputs` and increase `model.num_virtual_tokens` if needed.
+3. Add its output to `_prepare_inputs` and update `TransformerFusion.num_tokens` if needed.
 4. Update `config.yaml` with the new hyperparameters.
 
-### Change the LLM Backbone
+### Replace the Fusion Block
 
-1. Download the new weights to a local directory.
-2. Update `model.llm_path` and `model.llm_hidden_dim` to match the new model.
-3. Update `lora.target_modules` to the attention/FFN projection names of the new architecture.
+1. Implement the new fusion module in `src/models/` (e.g., a larger Transformer or a Perceiver-style block).
+2. Swap `TransformerFusion` for your module inside `DlCsiPredictor`.
+3. Update the `model.transformer_fusion` config section accordingly.
 
 ### Add a New Baseline
 
@@ -359,7 +305,6 @@ Before first run, update at least:
 ## 11. Known Limitations / TODO
 
 - The Sionna ray synthesizer assumes far-field ULA array responses. For UPA or dual-polarization arrays, extend `_synthesize_cir_from_rays` with full 2D/3D array responses.
-- `modules_to_save` in LoRA config is left empty because a custom regression head is used instead of `lm_head`.
 - The current generator does not model UE mobility across slots inside one sample; it resamples fast fading independently per slot.
 - Windows multiprocessing with H5 can be fragile; reduce `num_workers` to 0 if DataLoader hangs.
 
@@ -367,11 +312,11 @@ Before first run, update at least:
 
 ## 12. Citation
 
-If you use this code, please cite the underlying datasets and models appropriately (3GPP TR 38.901, Sionna, DeepSeek-R1-Distill-Qwen).
+If you use this code, please cite the underlying datasets and models appropriately (3GPP TR 38.901, Sionna).
 
 ```bibtex
 @software{dl_csi_v2,
-  title = {DL-CSI-v2: DeepSeek-LLM based FDD Downlink CSI Prediction},
+  title = {DL-CSI-v2: CNN+Transformer based FDD Downlink CSI Prediction},
   author = {Sun, Ce},
   year = {2026},
 }

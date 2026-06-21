@@ -1,4 +1,4 @@
-"""Stage 1: Warmup training of local encoders + regression head."""
+"""Single-stage end-to-end training of the CNN+Transformer CSI predictor."""
 import argparse
 import os
 import sys
@@ -14,7 +14,7 @@ from src.utils.logging import Logger
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Warmup training (encoders + head).")
+    parser = argparse.ArgumentParser(description="Train CNN+Transformer CSI predictor.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
     args = parser.parse_args()
@@ -47,9 +47,9 @@ def main():
     model = DlCsiPredictor(config)
     logger = Logger(
         log_dir=str(config.project.log_dir),
-        experiment_name="warmup",
+        experiment_name="train",
     )
-    trainer = Trainer(model, config, stage="warmup", logger=logger)
+    trainer = Trainer(model, config, logger=logger)
 
     if args.resume:
         trainer.load_checkpoint(args.resume)

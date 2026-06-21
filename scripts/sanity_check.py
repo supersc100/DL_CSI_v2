@@ -1,7 +1,7 @@
-"""Shape sanity check without loading real data or LLM weights.
+"""Shape sanity check without loading real data.
 
-This script builds the model with dummy inputs to verify tensor shapes. It skips
-LLM loading by substituting a tiny random Transformer if no weights are found.
+This script builds the CNN+Transformer model with dummy inputs to verify tensor
+shapes. No LLM weights are required.
 """
 import argparse
 import os
@@ -15,34 +15,9 @@ from src.config import load_config
 from src.models.dl_csi_predictor import DlCsiPredictor
 
 
-class DummyLLM(torch.nn.Module):
-    """Minimal transformer stand-in for shape checking."""
-
-    def __init__(self, hidden_dim: int, num_layers: int = 2, num_heads: int = 4):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        layer = torch.nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 2,
-            batch_first=True,
-        )
-        self.encoder = torch.nn.TransformerEncoder(layer, num_layers=num_layers)
-
-    def forward(self, inputs_embeds, output_hidden_states=False, return_dict=False):
-        out = self.encoder(inputs_embeds)
-        class Output:
-            pass
-        o = Output()
-        o.hidden_states = [out]
-        o.last_hidden_state = out
-        return o
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--skip-llm", action="store_true", help="Replace LLM with a tiny dummy transformer")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -53,11 +28,8 @@ def main():
     M = int(config.data.num_subcarriers)
     num_ls = int(config.model.env_encoder.input_dim)
 
-    if args.skip_llm or not os.path.isdir(str(config.model.llm_path)):
-        print("Substituting LLM with dummy transformer for shape check.")
-        model = DlCsiPredictor(config, llm=DummyLLM(int(config.model.llm_hidden_dim)))
-    else:
-        model = DlCsiPredictor(config)
+    model = DlCsiPredictor(config)
+    print(f"Model parameters: {model.count_parameters()}")
 
     current_ul_ad = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
     history_ul_ad = torch.randn(B, T, N_tx, N_rx, M, dtype=torch.complex64)

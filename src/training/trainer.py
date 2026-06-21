@@ -1,72 +1,53 @@
-"""Generic trainer for the FDD CSI predictor."""
+"""Single-stage trainer for the CNN+Transformer FDD CSI predictor."""
 import os
 from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
-from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import autocast, GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
-from src.data.transforms import real_channels_to_complex
 from src.training.losses import CsiLoss, NmseLoss
 from src.utils.logging import Logger
 from src.utils.metrics import compute_metrics
 
 
 class Trainer:
-    """Trainer that supports warmup, LoRA, and optional full-finetune stages."""
+    """End-to-end trainer for the non-LLM CSI predictor."""
 
     def __init__(
         self,
         model: nn.Module,
         config: Any,
-        stage: str = "warmup",
         logger: Optional[Logger] = None,
     ):
         self.model = model
         self.config = config
-        self.stage = stage
         self.device = torch.device(str(config.project.device))
         self.logger = logger or Logger(str(config.project.log_dir))
 
-        # Move local modules to target device. The LLM was already placed via
-        # device_map; calling .to() on the whole model can be intercepted by
-        # accelerate hooks, so we move the non-LLM submodules individually.
-        for module in (
-            self.model.csi_encoder,
-            self.model.temporal_encoder,
-            self.model.env_encoder,
-            self.model.fusion,
-            self.model.embedding_projection,
-            self.model.regression_head,
-        ):
-            if module is not None:
-                module.to(self.device)
+        # Move the whole model to the target device.
+        self.model.to(self.device)
 
-        # Stage-specific training config.
-        self.stage_cfg = getattr(config.training, stage)
-        self.model.set_trainable(stage)
-
-        # Optimizer.
+        # Optimizer over all trainable parameters.
         self.optimizer = AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=float(self.stage_cfg.lr),
-            weight_decay=float(self.stage_cfg.weight_decay),
+            model.parameters(),
+            lr=float(config.training.lr),
+            weight_decay=float(config.training.weight_decay),
         )
 
         # Losses.
         self.criterion = CsiLoss(
-            mse_weight=float(self.stage_cfg.loss.mse_weight),
-            angle_delay_l1_weight=float(self.stage_cfg.loss.angle_delay_l1_weight),
+            mse_weight=float(config.training.loss.mse_weight),
+            angle_delay_l1_weight=float(config.training.loss.angle_delay_l1_weight),
         )
         self.nmse_loss = NmseLoss()
 
         # AMP / scaler.
         self.use_amp = bool(config.project.mixed_precision) and self.device.type == "cuda"
-        self.scaler = GradScaler() if self.use_amp else None
+        self.scaler = GradScaler("cuda") if self.use_amp else None
 
         # Checkpoint / logging.
         self.global_step = 0
@@ -75,7 +56,7 @@ class Trainer:
         self.start_epoch = 0
 
     def _build_scheduler(self, total_steps: int) -> Optional[Any]:
-        scheduler_name = str(self.stage_cfg.scheduler).lower()
+        scheduler_name = str(self.config.training.scheduler).lower()
         if scheduler_name == "cosine":
             return CosineAnnealingLR(self.optimizer, T_max=total_steps)
         return None
@@ -97,7 +78,7 @@ class Trainer:
         num_batches = 0
 
         context = torch.enable_grad if is_training else torch.no_grad
-        pbar = tqdm(dataloader, desc=f"{self.stage} {'train' if is_training else 'val'} epoch {epoch}")
+        pbar = tqdm(dataloader, desc=f"{'train' if is_training else 'val'} epoch {epoch}")
 
         with context():
             for batch in pbar:
@@ -162,17 +143,17 @@ class Trainer:
         epochs: Optional[int] = None,
     ) -> Dict[str, float]:
         if epochs is None:
-            epochs = int(self.stage_cfg.epochs)
+            epochs = int(self.config.training.epochs)
 
         total_steps = epochs * len(train_loader)
         scheduler = self._build_scheduler(total_steps)
 
-        self.logger.log(f"Starting {self.stage} training for {epochs} epochs.")
+        self.logger.log(f"Starting training for {epochs} epochs.")
         self.logger.log(f"Trainable parameters: {self.model.count_parameters()['trainable']}")
 
         for epoch in range(self.start_epoch, epochs):
             train_metrics = self._run_epoch(train_loader, is_training=True, epoch=epoch)
-            self.logger.log_metrics(train_metrics, step=self.global_step, prefix=f"{self.stage}/train")
+            self.logger.log_metrics(train_metrics, step=self.global_step, prefix="train")
             self.logger.log(
                 f"Epoch {epoch}/{epochs} train: loss={train_metrics['loss']:.4f}, "
                 f"NMSE={train_metrics['nmse_db']:.3f} dB, cos={train_metrics['cosine_similarity']:.4f}"
@@ -183,7 +164,7 @@ class Trainer:
                 or epoch == epochs - 1
             ):
                 val_metrics = self._run_epoch(val_loader, is_training=False, epoch=epoch)
-                self.logger.log_metrics(val_metrics, step=self.global_step, prefix=f"{self.stage}/val")
+                self.logger.log_metrics(val_metrics, step=self.global_step, prefix="val")
                 self.logger.log(
                     f"Epoch {epoch}/{epochs} val:   loss={val_metrics['loss']:.4f}, "
                     f"NMSE={val_metrics['nmse_db']:.3f} dB, cos={val_metrics['cosine_similarity']:.4f}"
@@ -195,7 +176,7 @@ class Trainer:
                     self.best_val_nmse = val_nmse
                     self.patience_counter = 0
                     self.save_checkpoint(
-                        os.path.join(self.config.project.checkpoint_dir, f"best_{self.stage}.pt")
+                        os.path.join(self.config.project.checkpoint_dir, "best.pt")
                     )
                 else:
                     self.patience_counter += 1
@@ -205,7 +186,7 @@ class Trainer:
 
             if epoch % int(self.config.training.logging.save_interval) == 0:
                 self.save_checkpoint(
-                    os.path.join(self.config.project.checkpoint_dir, f"{self.stage}_epoch{epoch}.pt")
+                    os.path.join(self.config.project.checkpoint_dir, f"epoch{epoch}.pt")
                 )
 
             if scheduler is not None:
@@ -217,7 +198,6 @@ class Trainer:
     def save_checkpoint(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         state = {
-            "stage": self.stage,
             "epoch": self.global_step,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),

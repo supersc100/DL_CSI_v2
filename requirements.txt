@@ -2,14 +2,6 @@
 torch>=2.11.0
 # torchvision>=0.20.0     # 暂时未使用：项目处理 CSI 张量，不涉及图像/视觉模型
 
-# LLM ecosystem
-transformers>=5.5.4
-peft>=0.19.0
-accelerate>=1.0.0         # transformers 使用 device_map 时的间接依赖
-# bitsandbytes>=0.45.0    # 暂时未使用：8-bit 量化未启用
-# sentencepiece>=0.2.0    # 暂时未使用：当前代码未加载 tokenizer
-# protobuf>=5.28.0        # 暂时未使用：sentencepiece/transformers 的间接依赖，当前未加载 tokenizer
-
 # Channel simulation (TensorFlow backend)
 tensorflow>=2.18.0        # Sionna 2.x depends on TF
 sionna>=2.0.1

@@ -1,10 +1,10 @@
-"""Regression head mapping LLM hidden states to predicted downlink CSI."""
+"""Regression head mapping fused features to predicted downlink CSI."""
 import torch
 import torch.nn as nn
 
 
 class RegressionHead(nn.Module):
-    """Predict downlink CSI in angle-delay domain from LLM last hidden state.
+    """Predict downlink CSI in angle-delay domain from fused features.
 
     Output modes:
         - "ri":      predict real and imaginary parts, then reconstruct complex.
@@ -13,7 +13,7 @@ class RegressionHead(nn.Module):
 
     def __init__(
         self,
-        llm_hidden_dim: int,
+        input_dim: int,
         output_dim: int,
         hidden_dim: int = 1024,
         output_mode: str = "ri",
@@ -24,7 +24,7 @@ class RegressionHead(nn.Module):
         self.output_dim = output_dim
 
         self.mlp = nn.Sequential(
-            nn.Linear(llm_hidden_dim, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
@@ -34,7 +34,7 @@ class RegressionHead(nn.Module):
         )
 
     def forward(self, hidden: torch.Tensor, target_shape: tuple) -> torch.Tensor:
-        # hidden: [B, llm_hidden_dim]
+        # hidden: [B, input_dim]
         # Cast to float32 so complex conversion is well-defined and loss is stable.
         x = self.mlp(hidden.to(torch.float32))
 

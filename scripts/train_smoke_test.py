@@ -1,9 +1,8 @@
-"""Fast end-to-end training smoke test without the real 1.5B LLM.
+"""Fast end-to-end training smoke test for the CNN+Transformer CSI predictor.
 
-This script creates in-memory dummy data, swaps the LLM for a tiny random
-transformer, and runs a few epochs of warmup training. It is meant to verify
-that the full training loop (data -> model -> loss -> backward -> optimizer)
-works before spending time on LLM weight downloads and Sionna data generation.
+This script creates in-memory dummy data, shrinks the model dims, and runs a few
+epochs of training. It is meant to verify that the full training loop works
+before spending time on Sionna data generation and full-scale training.
 """
 import argparse
 import os
@@ -12,39 +11,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.config import load_config
 from src.models.dl_csi_predictor import DlCsiPredictor
 from src.training.trainer import Trainer
 from src.utils.logging import Logger
-
-
-class DummyLLM(torch.nn.Module):
-    """Minimal transformer stand-in for fast smoke tests."""
-
-    def __init__(self, hidden_dim: int, num_layers: int = 2, num_heads: int = 4):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        layer = torch.nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 2,
-            batch_first=True,
-        )
-        self.encoder = torch.nn.TransformerEncoder(layer, num_layers=num_layers)
-
-    def forward(self, inputs_embeds, output_hidden_states=False, return_dict=False):
-        out = self.encoder(inputs_embeds)
-
-        class Output:
-            pass
-
-        o = Output()
-        o.hidden_states = [out]
-        o.last_hidden_state = out
-        return o
 
 
 class DummyCsiDataset(TensorDataset):
@@ -104,8 +76,7 @@ def override_config_for_smoke(config):
     """Shrink model and training config so the smoke test runs in seconds."""
     # Model dims.
     config.model.feature_dim = 128
-    config.model.llm_hidden_dim = 128
-    config.model.num_virtual_tokens = 3
+    config.model.hidden_dim = 128
 
     # CSI encoder.
     config.model.csi_encoder.base_channels = 16
@@ -123,6 +94,12 @@ def override_config_for_smoke(config):
     config.model.env_encoder.hidden_dims = [64, 128]
     config.model.env_encoder.output_dim = 128
 
+    # Transformer fusion.
+    config.model.transformer_fusion.num_layers = 2
+    config.model.transformer_fusion.num_heads = 4
+    config.model.transformer_fusion.mlp_ratio = 4.0
+    config.model.transformer_fusion.dropout = 0.1
+
     # Regression head.
     config.model.regression_head.hidden_dim = 256
 
@@ -133,12 +110,11 @@ def override_config_for_smoke(config):
     config.project.mixed_precision = False
     config.project.device = "cpu"
 
-    # Warmup stage.
-    config.training.warmup.epochs = 2
-    config.training.warmup.lr = 1e-3
-    config.training.warmup.weight_decay = 1e-4
-    config.training.warmup.loss.mse_weight = 1.0
-    config.training.warmup.loss.angle_delay_l1_weight = 0.1
+    config.training.epochs = 2
+    config.training.lr = 1e-3
+    config.training.weight_decay = 1e-4
+    config.training.loss.mse_weight = 1.0
+    config.training.loss.angle_delay_l1_weight = 0.1
 
     # Disable early stopping / long eval intervals for smoke test.
     config.training.early_stopping.patience = 10
@@ -150,7 +126,7 @@ def override_config_for_smoke(config):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fast training smoke test without real LLM/data.")
+    parser = argparse.ArgumentParser(description="Fast training smoke test without real data.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--samples", type=int, default=16, help="Dummy train/val samples")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -187,10 +163,10 @@ def main():
         shuffle=False,
     )
 
-    model = DlCsiPredictor(config, llm=DummyLLM(int(config.model.llm_hidden_dim)))
+    model = DlCsiPredictor(config)
 
     logger = Logger(log_dir=str(config.project.log_dir), experiment_name="smoke_test")
-    trainer = Trainer(model, config, stage="warmup", logger=logger)
+    trainer = Trainer(model, config, logger=logger)
 
     print("Smoke test parameters:", model.count_parameters())
     print(f"Training on {args.samples} dummy samples for {args.epochs} epochs...")

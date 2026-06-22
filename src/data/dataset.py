@@ -28,6 +28,8 @@ class FddCsiDataset(Dataset):
         return_spatial: If True, keep raw spatial fields in samples.
         use_history: If False, the dataset does not load, transform, or return
             any history fields. This is used for the no-history ablation.
+        use_large_scale: If False, the dataset does not load or return the
+            large_scale field. This is used for the no-large-scale ablation.
     """
 
     def __init__(
@@ -37,12 +39,14 @@ class FddCsiDataset(Dataset):
         load_history: bool = True,
         return_spatial: bool = False,
         use_history: bool = True,
+        use_large_scale: bool = True,
     ):
         self.h5_path = h5_path
         self.transform = transform or AngleDelayTransform()
         self.load_history = load_history and use_history
         self.return_spatial = return_spatial
         self.use_history = use_history
+        self.use_large_scale = use_large_scale
 
         if not os.path.exists(h5_path):
             raise FileNotFoundError(f"Dataset file not found: {h5_path}")
@@ -68,7 +72,8 @@ class FddCsiDataset(Dataset):
         with h5py.File(self.h5_path, "r") as f:
             h_ul = np.array(f["h_ul"][idx])
             h_dl = np.array(f["h_dl"][idx])
-            large_scale = np.array(f["large_scale"][idx])
+            if self.use_large_scale:
+                large_scale = np.array(f["large_scale"][idx])
             if self.use_history and self.load_history:
                 history_ul = np.array(f["history_ul"][idx])
                 history_dl = np.array(f["history_dl"][idx])
@@ -82,8 +87,9 @@ class FddCsiDataset(Dataset):
         sample = {
             "h_ul": self._to_tensor(h_ul),
             "h_dl": self._to_tensor(h_dl),
-            "large_scale": self._to_tensor(large_scale).float(),
         }
+        if self.use_large_scale:
+            sample["large_scale"] = self._to_tensor(large_scale).float()
         if self.use_history:
             sample["history_ul"] = self._to_tensor(history_ul)
             sample["history_dl"] = self._to_tensor(history_dl)
@@ -132,6 +138,7 @@ def build_dataloader(
     transform: Optional[AngleDelayTransform] = None,
     load_history: bool = True,
     use_history: bool = True,
+    use_large_scale: bool = True,
     **kwargs: Any,
 ):
     """Create a DataLoader from an H5 dataset."""
@@ -140,6 +147,7 @@ def build_dataloader(
         transform=transform,
         load_history=load_history,
         use_history=use_history,
+        use_large_scale=use_large_scale,
     )
     return torch.utils.data.DataLoader(
         dataset,

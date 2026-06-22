@@ -58,6 +58,7 @@ class Trainer:
         self.start_epoch = 0
         self.metric_to_monitor = str(self.config.training.early_stopping.get("monitor", "val_nmse"))
         self.use_history = bool(getattr(self.config.model, "use_history", True))
+        self.use_large_scale = bool(getattr(self.config.model, "use_large_scale", True))
 
     def _build_scheduler(self, total_steps: int) -> Optional[Any]:
         scheduler_name = str(self.config.training.scheduler).lower()
@@ -89,23 +90,27 @@ class Trainer:
         with context():
             for batch in pbar:
                 current_ul_ad = batch["h_ul_ad"].to(self.device)
-                large_scale = batch["large_scale"].to(self.device)
                 target_dl_ad = batch["h_dl_ad"].to(self.device)
 
                 if self.use_history:
                     history_ul_ad = batch["history_ul_ad"].to(self.device)
                     history_dl_ad = batch["history_dl_ad"].to(self.device)
 
+                large_scale = None
+                if self.use_large_scale:
+                    large_scale = batch["large_scale"].to(self.device)
+
                 if is_training:
                     self.optimizer.zero_grad()
 
                 with autocast("cuda", enabled=self.use_amp, dtype=torch.bfloat16):
+                    model_kwargs = {}
                     if self.use_history:
-                        pred_dl_ad = self.model(
-                            current_ul_ad, large_scale, history_ul_ad, history_dl_ad
-                        )
-                    else:
-                        pred_dl_ad = self.model(current_ul_ad, large_scale)
+                        model_kwargs["history_ul_ad"] = history_ul_ad
+                        model_kwargs["history_dl_ad"] = history_dl_ad
+                    if self.use_large_scale:
+                        model_kwargs["large_scale"] = large_scale
+                    pred_dl_ad = self.model(current_ul_ad, **model_kwargs)
                     loss = self.criterion(pred_dl_ad, target_dl_ad)
 
                 if is_training:

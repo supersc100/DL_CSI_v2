@@ -46,7 +46,7 @@ class DlCsiPredictor(nn.Module):
         - current_ul_ad:  [B, N_tx, N_rx, M] (complex)
         - history_ul_ad:  [B, T, N_tx, N_rx, M] (complex), optional
         - history_dl_ad:  [B, T, N_tx, N_rx, M] (complex), optional
-        - large_scale:    [B, num_large_scale]
+        - large_scale:    [B, num_large_scale], optional
 
     Outputs:
         - pred_dl_ad:     [B, N_tx, N_rx, M] (complex)
@@ -59,6 +59,7 @@ class DlCsiPredictor(nn.Module):
         self.hidden_dim = int(config.model.get("hidden_dim", self.feature_dim))
         self.output_mode = str(config.model.regression_head.output_mode)
         self.use_history = bool(config.model.get("use_history", True))
+        self.use_large_scale = bool(config.model.get("use_large_scale", True))
 
         # Local encoders.
         self.csi_encoder = CsiEncoder(
@@ -88,12 +89,15 @@ class DlCsiPredictor(nn.Module):
         else:
             self.temporal_encoder = None
 
-        self.env_encoder = EnvironmentEncoder(
-            input_dim=int(config.model.env_encoder.input_dim),
-            hidden_dims=list(config.model.env_encoder.hidden_dims),
-            output_dim=self.feature_dim,
-            dropout=float(config.model.env_encoder.dropout),
-        )
+        if self.use_large_scale:
+            self.env_encoder = EnvironmentEncoder(
+                input_dim=int(config.model.env_encoder.input_dim),
+                hidden_dims=list(config.model.env_encoder.hidden_dims),
+                output_dim=self.feature_dim,
+                dropout=float(config.model.env_encoder.dropout),
+            )
+        else:
+            self.env_encoder = None
 
         # Optional cross-attention fusion.
         if bool(config.model.fusion.use_cross_attention):
@@ -106,7 +110,7 @@ class DlCsiPredictor(nn.Module):
             self.fusion = None
 
         # Lightweight Transformer fusion (replaces the frozen LLM backbone).
-        num_tokens = 3 if self.use_history else 2
+        num_tokens = 1 + (1 if self.use_history else 0) + (1 if self.use_large_scale else 0)
         self.transformer_fusion = TransformerFusion(
             feature_dim=self.feature_dim,
             hidden_dim=self.hidden_dim,
@@ -136,7 +140,7 @@ class DlCsiPredictor(nn.Module):
     def _prepare_inputs(
         self,
         current_ul_ad: torch.Tensor,
-        large_scale: torch.Tensor,
+        large_scale: Optional[torch.Tensor] = None,
         history_ul_ad: Optional[torch.Tensor] = None,
         history_dl_ad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -146,7 +150,14 @@ class DlCsiPredictor(nn.Module):
 
         # Encode each modality.
         current_feat = self.csi_encoder(current_ul_ri)  # [B, feature_dim]
-        env_feat = self.env_encoder(large_scale)  # [B, feature_dim]
+
+        features = [current_feat]
+
+        if self.use_large_scale:
+            if large_scale is None:
+                raise ValueError("use_large_scale=True but large_scale not provided.")
+            env_feat = self.env_encoder(large_scale)  # [B, feature_dim]
+            features.append(env_feat)
 
         if self.use_history:
             if history_ul_ad is None or history_dl_ad is None:
@@ -157,24 +168,20 @@ class DlCsiPredictor(nn.Module):
             history_ul_ri = complex_to_real_channels(history_ul_ad).permute(0, 2, 1, 3, 4, 5)
             history_dl_ri = complex_to_real_channels(history_dl_ad).permute(0, 2, 1, 3, 4, 5)
             temporal_feat = self.temporal_encoder(history_ul_ri, history_dl_ri)  # [B, feature_dim]
+            features.append(temporal_feat)
 
-            # Fuse.
-            if self.fusion is not None:
-                tokens = self.fusion(current_feat, temporal_feat, env_feat)  # [B, 3, feature_dim]
-            else:
-                tokens = torch.stack([current_feat, temporal_feat, env_feat], dim=1)
+        # Fuse variable number of tokens.
+        if self.fusion is not None:
+            tokens = self.fusion(*features)  # [B, num_tokens, feature_dim]
         else:
-            if self.fusion is not None:
-                tokens = self.fusion(current_feat, env_feat)  # [B, 2, feature_dim]
-            else:
-                tokens = torch.stack([current_feat, env_feat], dim=1)
+            tokens = torch.stack(features, dim=1)
 
         return tokens
 
     def forward(
         self,
         current_ul_ad: torch.Tensor,
-        large_scale: torch.Tensor,
+        large_scale: Optional[torch.Tensor] = None,
         history_ul_ad: Optional[torch.Tensor] = None,
         history_dl_ad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

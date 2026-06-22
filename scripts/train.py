@@ -21,6 +21,7 @@ def main():
 
     config = load_config(args.config)
     use_history = bool(getattr(config.model, "use_history", True))
+    use_large_scale = bool(getattr(config.model, "use_large_scale", True))
 
     transform = AngleDelayTransform(
         use_2d_antenna_dft=bool(config.preprocess.angle_delay.use_2d_antenna_dft),
@@ -36,6 +37,7 @@ def main():
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
         use_history=use_history,
+        use_large_scale=use_large_scale,
     )
     val_loader = build_dataloader(
         h5_path=str(config.data.h5_val),
@@ -45,6 +47,7 @@ def main():
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
         use_history=use_history,
+        use_large_scale=use_large_scale,
     )
 
     model = DlCsiPredictor(config)

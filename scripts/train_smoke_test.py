@@ -31,14 +31,16 @@ class DummyCsiDataset(TensorDataset):
         num_large_scale: int,
         history_window: int = 0,
         use_history: bool = True,
+        use_large_scale: bool = True,
     ):
         self.num_samples = num_samples
         self.use_history = use_history
+        self.use_large_scale = use_large_scale
         # Angle-delay domain complex tensors.
         h_ul_ad = torch.randn(num_samples, num_tx, num_rx, num_subcarriers, dtype=torch.complex64)
         h_dl_ad = torch.randn(num_samples, num_tx, num_rx, num_subcarriers, dtype=torch.complex64)
-        large_scale = torch.randn(num_samples, num_large_scale)
 
+        tensors = [h_ul_ad]
         if use_history:
             history_ul_ad = torch.randn(
                 num_samples, history_window, num_tx, num_rx, num_subcarriers, dtype=torch.complex64
@@ -46,27 +48,23 @@ class DummyCsiDataset(TensorDataset):
             history_dl_ad = torch.randn(
                 num_samples, history_window, num_tx, num_rx, num_subcarriers, dtype=torch.complex64
             )
-            super().__init__(h_ul_ad, history_ul_ad, history_dl_ad, large_scale, h_dl_ad)
-        else:
-            super().__init__(h_ul_ad, large_scale, h_dl_ad)
+            tensors.extend([history_ul_ad, history_dl_ad])
+        if use_large_scale:
+            large_scale = torch.randn(num_samples, num_large_scale)
+            tensors.append(large_scale)
+        tensors.append(h_dl_ad)
+        super().__init__(*tensors)
 
     def __getitem__(self, idx):
+        sample = {"h_ul_ad": self.tensors[0][idx], "h_dl_ad": self.tensors[-1][idx]}
+        tensor_idx = 1
         if self.use_history:
-            h_ul_ad, history_ul_ad, history_dl_ad, large_scale, h_dl_ad = super().__getitem__(idx)
-            return {
-                "h_ul_ad": h_ul_ad,
-                "history_ul_ad": history_ul_ad,
-                "history_dl_ad": history_dl_ad,
-                "large_scale": large_scale,
-                "h_dl_ad": h_dl_ad,
-            }
-        else:
-            h_ul_ad, large_scale, h_dl_ad = super().__getitem__(idx)
-            return {
-                "h_ul_ad": h_ul_ad,
-                "large_scale": large_scale,
-                "h_dl_ad": h_dl_ad,
-            }
+            sample["history_ul_ad"] = self.tensors[tensor_idx][idx]
+            sample["history_dl_ad"] = self.tensors[tensor_idx + 1][idx]
+            tensor_idx += 2
+        if self.use_large_scale:
+            sample["large_scale"] = self.tensors[tensor_idx][idx]
+        return sample
 
 
 def build_dummy_dataloader(
@@ -78,6 +76,7 @@ def build_dummy_dataloader(
     num_large_scale: int,
     history_window: int = 0,
     use_history: bool = True,
+    use_large_scale: bool = True,
     shuffle: bool = True,
 ):
     dataset = DummyCsiDataset(
@@ -88,6 +87,7 @@ def build_dummy_dataloader(
         num_large_scale,
         history_window=history_window,
         use_history=use_history,
+        use_large_scale=use_large_scale,
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
 
@@ -95,6 +95,7 @@ def build_dummy_dataloader(
 def override_config_for_smoke(config):
     """Shrink model and training config so the smoke test runs in seconds."""
     use_history = bool(getattr(config.model, "use_history", True))
+    use_large_scale = bool(getattr(config.model, "use_large_scale", True))
 
     # Model dims.
     config.model.feature_dim = 128
@@ -113,9 +114,10 @@ def override_config_for_smoke(config):
         config.model.temporal_encoder.transformer.hidden_dim = 128
         config.model.temporal_encoder.transformer.num_heads = 4
 
-    # Environment encoder.
-    config.model.env_encoder.hidden_dims = [64, 128]
-    config.model.env_encoder.output_dim = 128
+    if use_large_scale:
+        # Environment encoder.
+        config.model.env_encoder.hidden_dims = [64, 128]
+        config.model.env_encoder.output_dim = 128
 
     # Transformer fusion.
     config.model.transformer_fusion.num_layers = 2
@@ -166,6 +168,7 @@ def main():
     T = int(config.data.history_window)
     num_ls = int(config.model.env_encoder.input_dim)
     use_history = bool(getattr(config.model, "use_history", True))
+    use_large_scale = bool(getattr(config.model, "use_large_scale", True))
 
     train_loader = build_dummy_dataloader(
         num_samples=args.samples,
@@ -176,6 +179,7 @@ def main():
         num_large_scale=num_ls,
         history_window=T,
         use_history=use_history,
+        use_large_scale=use_large_scale,
         shuffle=True,
     )
     val_loader = build_dummy_dataloader(
@@ -187,6 +191,7 @@ def main():
         num_large_scale=num_ls,
         history_window=T,
         use_history=use_history,
+        use_large_scale=use_large_scale,
         shuffle=False,
     )
 
@@ -198,6 +203,7 @@ def main():
     print("Smoke test parameters:", model.count_parameters())
     print(f"Training on {args.samples} dummy samples for {args.epochs} epochs...")
     print(f"use_history: {use_history}")
+    print(f"use_large_scale: {use_large_scale}")
 
     result = trainer.fit(train_loader, val_loader, epochs=args.epochs)
 

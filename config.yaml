@@ -88,6 +88,10 @@ model:
   # Set to false to run the no-history ablation (current UL + large-scale only).
   use_history: false
 
+  # Whether to use the explicit large-scale parameter branch.
+  # Set to false to run the no-large-scale ablation (current UL + history only).
+  use_large_scale: true
+
   # Shared feature dimension after local encoders.
   feature_dim: 512         # dimension after CSI / temporal / env encoders
 

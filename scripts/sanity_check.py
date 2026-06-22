@@ -28,15 +28,19 @@ def main():
     M = int(config.data.num_subcarriers)
     num_ls = int(config.model.env_encoder.input_dim)
     use_history = bool(getattr(config.model, "use_history", True))
+    use_large_scale = bool(getattr(config.model, "use_large_scale", True))
 
     model = DlCsiPredictor(config)
     print(f"Model parameters: {model.count_parameters()}")
     print(f"use_history: {use_history}")
+    print(f"use_large_scale: {use_large_scale}")
 
     current_ul_ad = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
-    large_scale = torch.randn(B, num_ls)
 
-    inputs = [current_ul_ad, large_scale]
+    inputs = [current_ul_ad]
+    if use_large_scale:
+        large_scale = torch.randn(B, num_ls)
+        inputs.append(large_scale)
     if use_history:
         history_ul_ad = torch.randn(B, T, N_tx, N_rx, M, dtype=torch.complex64)
         history_dl_ad = torch.randn(B, T, N_tx, N_rx, M, dtype=torch.complex64)
@@ -49,7 +53,8 @@ def main():
     if use_history:
         print(f"Input history UL AD shape:  {history_ul_ad.shape}")
         print(f"Input history DL AD shape:  {history_dl_ad.shape}")
-    print(f"Input large-scale shape:    {large_scale.shape}")
+    if use_large_scale:
+        print(f"Input large-scale shape:    {large_scale.shape}")
     print(f"Output pred DL AD shape:    {pred.shape}")
     assert pred.shape == (B, N_tx, N_rx, M), f"Expected {(B, N_tx, N_rx, M)}, got {pred.shape}"
     print("Shape check passed.")

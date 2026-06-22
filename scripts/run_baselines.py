@@ -31,6 +31,7 @@ def main():
 
     config = load_config(args.config)
     use_history = bool(getattr(config.model, "use_history", True))
+    use_large_scale = bool(getattr(config.model, "use_large_scale", True))
 
     transform = AngleDelayTransform(
         use_2d_antenna_dft=bool(config.preprocess.angle_delay.use_2d_antenna_dft),
@@ -47,6 +48,7 @@ def main():
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
         use_history=use_history,
+        use_large_scale=use_large_scale,
     )
 
     logger = Logger(log_dir=str(config.project.log_dir), experiment_name="baselines")
@@ -58,7 +60,7 @@ def main():
         all_targets = []
         for batch in tqdm(loader, desc=f"Baseline {name}"):
             current_ul_ad = batch["h_ul_ad"]
-            large_scale = batch["large_scale"]
+            large_scale = batch.get("large_scale")
             target_dl_ad = batch["h_dl_ad"]
 
             if name in ("copy_ul", "tdd_oracle"):

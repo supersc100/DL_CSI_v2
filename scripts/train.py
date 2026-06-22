@@ -48,6 +48,7 @@ def main():
     logger = Logger(
         log_dir=str(config.project.log_dir),
         experiment_name="train",
+        use_tensorboard=False,
     )
     trainer = Trainer(model, config, logger=logger)
 

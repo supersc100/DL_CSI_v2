@@ -3,11 +3,6 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except Exception:  # pragma: no cover - tensorboard may not be installed
-    SummaryWriter = None
-
 
 class Logger:
     """Simple file + tensorboard logger."""
@@ -25,8 +20,15 @@ class Logger:
         os.makedirs(self.log_dir, exist_ok=True)
 
         self.log_file = os.path.join(self.log_dir, "train.log")
-        self.use_tensorboard = use_tensorboard and SummaryWriter is not None
-        self.writer = SummaryWriter(self.log_dir) if self.use_tensorboard else None
+        self.use_tensorboard = use_tensorboard
+        self.writer = None
+        if self.use_tensorboard:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+
+                self.writer = SummaryWriter(self.log_dir)
+            except Exception:
+                self.use_tensorboard = False
 
     def log(self, message: str, level: str = "INFO") -> None:
         line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {message}"

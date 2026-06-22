@@ -20,6 +20,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    use_history = bool(getattr(config.model, "use_history", True))
 
     transform = AngleDelayTransform(
         use_2d_antenna_dft=bool(config.preprocess.angle_delay.use_2d_antenna_dft),
@@ -34,6 +35,7 @@ def main():
         num_workers=int(config.training.num_workers),
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
+        use_history=use_history,
     )
     val_loader = build_dataloader(
         h5_path=str(config.data.h5_val),
@@ -42,6 +44,7 @@ def main():
         num_workers=int(config.training.num_workers),
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
+        use_history=use_history,
     )
 
     model = DlCsiPredictor(config)

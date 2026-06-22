@@ -1,6 +1,6 @@
 """CNN+Transformer based FDD downlink CSI predictor (no LLM)."""
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from src.data.transforms import complex_to_real_channels
 
 
 class CrossAttentionFusion(nn.Module):
-    """Fuse three feature tokens via cross-attention."""
+    """Fuse a variable number of feature tokens via self-attention."""
 
     def __init__(self, feature_dim: int, num_heads: int = 8, dropout: float = 0.1):
         super().__init__()
@@ -28,15 +28,10 @@ class CrossAttentionFusion(nn.Module):
         )
         self.norm_out = nn.LayerNorm(feature_dim)
 
-    def forward(
-        self,
-        current: torch.Tensor,
-        temporal: torch.Tensor,
-        env: torch.Tensor,
-    ) -> torch.Tensor:
-        # Stack as [B, 3, feature_dim]
-        tokens = torch.stack([current, temporal, env], dim=1)
-        # Self-like cross-attention over the three tokens.
+    def forward(self, *features: torch.Tensor) -> torch.Tensor:
+        # Stack variable number of tokens as [B, num_tokens, feature_dim].
+        tokens = torch.stack(features, dim=1)
+        # Self-like cross-attention over the tokens.
         q = self.norm_q(tokens)
         kv = self.norm_kv(tokens)
         out, _ = self.attn(q, kv, kv, need_weights=False)
@@ -49,8 +44,8 @@ class DlCsiPredictor(nn.Module):
 
     Inputs:
         - current_ul_ad:  [B, N_tx, N_rx, M] (complex)
-        - history_ul_ad:  [B, T, N_tx, N_rx, M] (complex)
-        - history_dl_ad:  [B, T, N_tx, N_rx, M] (complex)
+        - history_ul_ad:  [B, T, N_tx, N_rx, M] (complex), optional
+        - history_dl_ad:  [B, T, N_tx, N_rx, M] (complex), optional
         - large_scale:    [B, num_large_scale]
 
     Outputs:
@@ -63,6 +58,7 @@ class DlCsiPredictor(nn.Module):
         self.feature_dim = int(config.model.feature_dim)
         self.hidden_dim = int(config.model.get("hidden_dim", self.feature_dim))
         self.output_mode = str(config.model.regression_head.output_mode)
+        self.use_history = bool(config.model.get("use_history", True))
 
         # Local encoders.
         self.csi_encoder = CsiEncoder(
@@ -75,19 +71,22 @@ class DlCsiPredictor(nn.Module):
             dropout=float(config.model.csi_encoder.dropout),
         )
 
-        self.temporal_encoder = TemporalEncoder(
-            csi_in_channels=int(config.model.temporal_encoder.csi.in_channels),
-            csi_base_channels=int(config.model.temporal_encoder.csi.base_channels),
-            csi_num_layers=int(config.model.temporal_encoder.csi.num_layers),
-            csi_kernel_size=int(config.model.temporal_encoder.csi.kernel_size),
-            csi_feature_dim=int(config.model.temporal_encoder.csi.csi_feature_dim),
-            transformer_hidden_dim=int(config.model.temporal_encoder.transformer.hidden_dim),
-            transformer_num_layers=int(config.model.temporal_encoder.transformer.num_layers),
-            transformer_num_heads=int(config.model.temporal_encoder.transformer.num_heads),
-            transformer_mlp_ratio=float(config.model.temporal_encoder.transformer.mlp_ratio),
-            feature_dim=self.feature_dim,
-            dropout=float(config.model.temporal_encoder.transformer.dropout),
-        )
+        if self.use_history:
+            self.temporal_encoder = TemporalEncoder(
+                csi_in_channels=int(config.model.temporal_encoder.csi.in_channels),
+                csi_base_channels=int(config.model.temporal_encoder.csi.base_channels),
+                csi_num_layers=int(config.model.temporal_encoder.csi.num_layers),
+                csi_kernel_size=int(config.model.temporal_encoder.csi.kernel_size),
+                csi_feature_dim=int(config.model.temporal_encoder.csi.csi_feature_dim),
+                transformer_hidden_dim=int(config.model.temporal_encoder.transformer.hidden_dim),
+                transformer_num_layers=int(config.model.temporal_encoder.transformer.num_layers),
+                transformer_num_heads=int(config.model.temporal_encoder.transformer.num_heads),
+                transformer_mlp_ratio=float(config.model.temporal_encoder.transformer.mlp_ratio),
+                feature_dim=self.feature_dim,
+                dropout=float(config.model.temporal_encoder.transformer.dropout),
+            )
+        else:
+            self.temporal_encoder = None
 
         self.env_encoder = EnvironmentEncoder(
             input_dim=int(config.model.env_encoder.input_dim),
@@ -107,6 +106,7 @@ class DlCsiPredictor(nn.Module):
             self.fusion = None
 
         # Lightweight Transformer fusion (replaces the frozen LLM backbone).
+        num_tokens = 3 if self.use_history else 2
         self.transformer_fusion = TransformerFusion(
             feature_dim=self.feature_dim,
             hidden_dim=self.hidden_dim,
@@ -114,7 +114,7 @@ class DlCsiPredictor(nn.Module):
             num_heads=int(config.model.transformer_fusion.num_heads),
             mlp_ratio=float(config.model.transformer_fusion.mlp_ratio),
             dropout=float(config.model.transformer_fusion.dropout),
-            num_tokens=3,
+            num_tokens=num_tokens,
         )
 
         # Output head.
@@ -136,44 +136,55 @@ class DlCsiPredictor(nn.Module):
     def _prepare_inputs(
         self,
         current_ul_ad: torch.Tensor,
-        history_ul_ad: torch.Tensor,
-        history_dl_ad: torch.Tensor,
         large_scale: torch.Tensor,
+        history_ul_ad: Optional[torch.Tensor] = None,
+        history_dl_ad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Convert complex CSI to real-channel representation.
         # current: [B, N_tx, N_rx, M] -> [B, 2, N_tx, N_rx, M]
-        # history: [B, T, N_tx, N_rx, M] -> [B, T, 2, N_tx, N_rx, M]
         current_ul_ri = complex_to_real_channels(current_ul_ad)
-        history_ul_ri = complex_to_real_channels(history_ul_ad).permute(0, 2, 1, 3, 4, 5)
-        history_dl_ri = complex_to_real_channels(history_dl_ad).permute(0, 2, 1, 3, 4, 5)
 
         # Encode each modality.
         current_feat = self.csi_encoder(current_ul_ri)  # [B, feature_dim]
-        temporal_feat = self.temporal_encoder(history_ul_ri, history_dl_ri)  # [B, feature_dim]
         env_feat = self.env_encoder(large_scale)  # [B, feature_dim]
 
-        # Fuse.
-        if self.fusion is not None:
-            tokens = self.fusion(current_feat, temporal_feat, env_feat)  # [B, 3, feature_dim]
+        if self.use_history:
+            if history_ul_ad is None or history_dl_ad is None:
+                raise ValueError(
+                    "use_history=True but history_ul_ad/history_dl_ad not provided."
+                )
+            # history: [B, T, N_tx, N_rx, M] -> [B, T, 2, N_tx, N_rx, M]
+            history_ul_ri = complex_to_real_channels(history_ul_ad).permute(0, 2, 1, 3, 4, 5)
+            history_dl_ri = complex_to_real_channels(history_dl_ad).permute(0, 2, 1, 3, 4, 5)
+            temporal_feat = self.temporal_encoder(history_ul_ri, history_dl_ri)  # [B, feature_dim]
+
+            # Fuse.
+            if self.fusion is not None:
+                tokens = self.fusion(current_feat, temporal_feat, env_feat)  # [B, 3, feature_dim]
+            else:
+                tokens = torch.stack([current_feat, temporal_feat, env_feat], dim=1)
         else:
-            tokens = torch.stack([current_feat, temporal_feat, env_feat], dim=1)
+            if self.fusion is not None:
+                tokens = self.fusion(current_feat, env_feat)  # [B, 2, feature_dim]
+            else:
+                tokens = torch.stack([current_feat, env_feat], dim=1)
 
         return tokens
 
     def forward(
         self,
         current_ul_ad: torch.Tensor,
-        history_ul_ad: torch.Tensor,
-        history_dl_ad: torch.Tensor,
         large_scale: torch.Tensor,
+        history_ul_ad: Optional[torch.Tensor] = None,
+        history_dl_ad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Prepare modality tokens.
         tokens = self._prepare_inputs(
-            current_ul_ad, history_ul_ad, history_dl_ad, large_scale
-        )  # [B, 3, feature_dim]
+            current_ul_ad, large_scale, history_ul_ad, history_dl_ad
+        )  # [B, num_tokens, feature_dim]
 
         # Transformer fusion.
-        transformer_out = self.transformer_fusion(tokens)  # [B, 3, hidden_dim]
+        transformer_out = self.transformer_fusion(tokens)  # [B, num_tokens, hidden_dim]
 
         # Pool over tokens.
         pooled = transformer_out.mean(dim=1)  # [B, hidden_dim]

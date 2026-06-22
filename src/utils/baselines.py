@@ -1,5 +1,5 @@
 """Baseline methods for FDD downlink CSI prediction."""
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -13,7 +13,7 @@ from src.data.transforms import (
 def baseline_copy_ul(
     current_ul_ad: torch.Tensor,
     target_dl_ad: torch.Tensor,
-    transform,
+    transform=None,
 ) -> Dict[str, torch.Tensor]:
     """Baseline 1: predict DL = current UL (performance lower bound)."""
     pred = current_ul_ad.clone()
@@ -22,19 +22,18 @@ def baseline_copy_ul(
 
 def baseline_angle_delay_interp(
     current_ul_ad: torch.Tensor,
-    history_ul_ad: torch.Tensor,
-    history_dl_ad: torch.Tensor,
     target_dl_ad: torch.Tensor,
+    history_ul_ad: Optional[torch.Tensor] = None,
+    history_dl_ad: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """Baseline 2: linear interpolation in angle-delay domain from recent history."""
-    B = current_ul_ad.shape[0]
+    if history_dl_ad is None or history_dl_ad.shape[1] < 2:
+        # Not enough history: fall back to copying current UL.
+        return baseline_copy_ul(current_ul_ad, target_dl_ad)
     # Use last two historical DL snapshots to linearly extrapolate next DL.
-    if history_dl_ad.shape[1] >= 2:
-        h0 = history_dl_ad[:, -2]
-        h1 = history_dl_ad[:, -1]
-        pred = 2.0 * h1 - h0
-    else:
-        pred = current_ul_ad.clone()
+    h0 = history_dl_ad[:, -2]
+    h1 = history_dl_ad[:, -1]
+    pred = 2.0 * h1 - h0
     return {"pred_ad": pred, "target_ad": target_dl_ad}
 
 
@@ -52,13 +51,13 @@ def baseline_tdd_oracle(
 
 def baseline_no_large_scale(
     current_ul_ad: torch.Tensor,
-    history_ul_ad: torch.Tensor,
-    history_dl_ad: torch.Tensor,
     target_dl_ad: torch.Tensor,
+    history_ul_ad: Optional[torch.Tensor] = None,
+    history_dl_ad: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
-    """Baseline 4 (ablation): use current UL + history but no explicit large-scale params.
+    """Baseline 4 (ablation): use current UL but no explicit large-scale params.
 
-    Implemented as current UL only (history ignored) for a simple ablation.
+    The large-scale vector is ignored for this simple baseline.
     """
     return baseline_copy_ul(current_ul_ad, target_dl_ad, None)
 

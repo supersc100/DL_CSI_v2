@@ -84,6 +84,10 @@ preprocess:
 # Model architecture
 # -----------------------------------------------------------------------------
 model:
+  # Whether to use the historical UL/DL CSI branch.
+  # Set to false to run the no-history ablation (current UL + large-scale only).
+  use_history: false
+
   # Shared feature dimension after local encoders.
   feature_dim: 512         # dimension after CSI / temporal / env encoders
 

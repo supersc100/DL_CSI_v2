@@ -30,6 +30,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    use_history = bool(getattr(config.model, "use_history", True))
 
     transform = AngleDelayTransform(
         use_2d_antenna_dft=bool(config.preprocess.angle_delay.use_2d_antenna_dft),
@@ -45,6 +46,7 @@ def main():
         num_workers=int(config.training.num_workers),
         transform=transform,
         pin_memory=bool(config.training.pin_memory),
+        use_history=use_history,
     )
 
     logger = Logger(log_dir=str(config.project.log_dir), experiment_name="baselines")
@@ -56,17 +58,26 @@ def main():
         all_targets = []
         for batch in tqdm(loader, desc=f"Baseline {name}"):
             current_ul_ad = batch["h_ul_ad"]
-            history_ul_ad = batch["history_ul_ad"]
-            history_dl_ad = batch["history_dl_ad"]
             large_scale = batch["large_scale"]
             target_dl_ad = batch["h_dl_ad"]
 
             if name in ("copy_ul", "tdd_oracle"):
                 result = fn(current_ul_ad, target_dl_ad)
             elif name == "angle_delay_interp":
-                result = fn(current_ul_ad, history_ul_ad, history_dl_ad, target_dl_ad)
+                if use_history:
+                    history_ul_ad = batch["history_ul_ad"]
+                    history_dl_ad = batch["history_dl_ad"]
+                    result = fn(current_ul_ad, target_dl_ad, history_ul_ad, history_dl_ad)
+                else:
+                    # No history available: baseline gracefully falls back.
+                    result = fn(current_ul_ad, target_dl_ad)
             elif name == "no_large_scale":
-                result = fn(current_ul_ad, history_ul_ad, history_dl_ad, target_dl_ad)
+                if use_history:
+                    history_ul_ad = batch["history_ul_ad"]
+                    history_dl_ad = batch["history_dl_ad"]
+                    result = fn(current_ul_ad, target_dl_ad, history_ul_ad, history_dl_ad)
+                else:
+                    result = fn(current_ul_ad, target_dl_ad)
             elif name == "no_history":
                 result = fn(current_ul_ad, large_scale, target_dl_ad)
             else:

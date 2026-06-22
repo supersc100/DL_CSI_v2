@@ -12,7 +12,7 @@ from src.data.dataset import build_dataloader
 from src.data.transforms import AngleDelayTransform
 from src.utils.baselines import BASELINES
 from src.utils.logging import Logger
-from src.utils.metrics import compute_metrics
+from src.utils.metrics import compute_all_metrics
 from tqdm import tqdm
 
 
@@ -77,7 +77,7 @@ def main():
 
         pred = torch.cat(all_preds, dim=0)
         target = torch.cat(all_targets, dim=0)
-        metrics = compute_metrics(pred, target)
+        metrics = compute_all_metrics(pred, target)
         logger.log(f"Baseline {name}: {metrics}")
         print(f"{name}: {metrics}")
 

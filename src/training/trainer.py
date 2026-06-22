@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from src.training.losses import CsiLoss, NmseLoss
 from src.utils.logging import Logger
-from src.utils.metrics import compute_metrics
+from src.utils.metrics import compute_all_metrics
 
 
 class Trainer:
@@ -41,6 +41,7 @@ class Trainer:
         # Losses.
         self.criterion = CsiLoss(
             mse_weight=float(config.training.loss.mse_weight),
+            magnitude_weight=float(config.training.loss.get("magnitude_weight", 1.0)),
             angle_delay_l1_weight=float(config.training.loss.angle_delay_l1_weight),
         )
         self.nmse_loss = NmseLoss()
@@ -51,9 +52,11 @@ class Trainer:
 
         # Checkpoint / logging.
         self.global_step = 0
-        self.best_val_nmse = float("inf")
+        self.best_val_metric = float("inf")
+        self.best_val_nmse = float("inf")  # kept for checkpoint compatibility
         self.patience_counter = 0
         self.start_epoch = 0
+        self.metric_to_monitor = str(self.config.training.early_stopping.get("monitor", "val_nmse"))
 
     def _build_scheduler(self, total_steps: int) -> Optional[Any]:
         scheduler_name = str(self.config.training.scheduler).lower()
@@ -75,6 +78,8 @@ class Trainer:
         total_loss = 0.0
         total_nmse = 0.0
         total_cos = 0.0
+        total_mag_nmse = 0.0
+        total_mag_cos = 0.0
         num_batches = 0
 
         context = torch.enable_grad if is_training else torch.no_grad
@@ -117,22 +122,26 @@ class Trainer:
 
                     self.global_step += 1
 
-                metrics = compute_metrics(pred_dl_ad.detach(), target_dl_ad.detach())
+                metrics = compute_all_metrics(pred_dl_ad.detach(), target_dl_ad.detach())
                 total_loss += float(loss.item())
                 total_nmse += metrics["nmse_db"]
                 total_cos += metrics["cosine_similarity"]
+                total_mag_nmse += metrics["magnitude_nmse_db"]
+                total_mag_cos += metrics["magnitude_cosine_similarity"]
                 num_batches += 1
 
                 pbar.set_postfix(
                     loss=total_loss / num_batches,
-                    nmse=total_nmse / num_batches,
-                    cos=total_cos / num_batches,
+                    mag_nmse=total_mag_nmse / num_batches,
+                    mag_cos=total_mag_cos / num_batches,
                 )
 
         avg_metrics = {
             "loss": total_loss / max(num_batches, 1),
             "nmse_db": total_nmse / max(num_batches, 1),
             "cosine_similarity": total_cos / max(num_batches, 1),
+            "magnitude_nmse_db": total_mag_nmse / max(num_batches, 1),
+            "magnitude_cosine_similarity": total_mag_cos / max(num_batches, 1),
         }
         return avg_metrics
 
@@ -156,7 +165,8 @@ class Trainer:
             self.logger.log_metrics(train_metrics, step=self.global_step, prefix="train")
             self.logger.log(
                 f"Epoch {epoch}/{epochs} train: loss={train_metrics['loss']:.4f}, "
-                f"NMSE={train_metrics['nmse_db']:.3f} dB, cos={train_metrics['cosine_similarity']:.4f}"
+                f"NMSE={train_metrics['nmse_db']:.3f} dB, cos={train_metrics['cosine_similarity']:.4f}, "
+                f"mag_NMSE={train_metrics['magnitude_nmse_db']:.3f} dB, mag_cos={train_metrics['magnitude_cosine_similarity']:.4f}"
             )
 
             if val_loader is not None and (
@@ -167,13 +177,21 @@ class Trainer:
                 self.logger.log_metrics(val_metrics, step=self.global_step, prefix="val")
                 self.logger.log(
                     f"Epoch {epoch}/{epochs} val:   loss={val_metrics['loss']:.4f}, "
-                    f"NMSE={val_metrics['nmse_db']:.3f} dB, cos={val_metrics['cosine_similarity']:.4f}"
+                    f"NMSE={val_metrics['nmse_db']:.3f} dB, cos={val_metrics['cosine_similarity']:.4f}, "
+                    f"mag_NMSE={val_metrics['magnitude_nmse_db']:.3f} dB, mag_cos={val_metrics['magnitude_cosine_similarity']:.4f}"
                 )
 
-                # Early stopping.
-                val_nmse = val_metrics["nmse_db"]
-                if val_nmse < self.best_val_nmse:
-                    self.best_val_nmse = val_nmse
+                # Early stopping on the configured metric (default: val_nmse).
+                monitored_name = self.metric_to_monitor.replace("val_", "")
+                val_monitored = val_metrics.get(monitored_name)
+                if val_monitored is None:
+                    raise ValueError(
+                        f"Early stopping metric '{self.metric_to_monitor}' not found in val metrics. "
+                        f"Available: {list(val_metrics.keys())}"
+                    )
+                if val_monitored < self.best_val_metric:
+                    self.best_val_metric = val_monitored
+                    self.best_val_nmse = val_metrics["nmse_db"]
                     self.patience_counter = 0
                     self.save_checkpoint(
                         os.path.join(self.config.project.checkpoint_dir, "best.pt")
@@ -193,7 +211,7 @@ class Trainer:
                 scheduler.step()
 
         self.logger.close()
-        return {"best_val_nmse": self.best_val_nmse}
+        return {"best_val_metric": self.best_val_metric, "best_val_nmse": self.best_val_nmse}
 
     def save_checkpoint(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -214,6 +232,7 @@ class Trainer:
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         self.global_step = state.get("epoch", 0)
         self.best_val_nmse = state.get("best_val_nmse", float("inf"))
+        self.best_val_metric = state.get("best_val_metric", self.best_val_nmse)
         if self.scaler is not None and "scaler_state_dict" in state:
             self.scaler.load_state_dict(state["scaler_state_dict"])
         self.logger.log(f"Loaded checkpoint from {path}")

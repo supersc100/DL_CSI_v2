@@ -113,7 +113,8 @@ def override_config_for_smoke(config):
     config.training.epochs = 2
     config.training.lr = 1e-3
     config.training.weight_decay = 1e-4
-    config.training.loss.mse_weight = 1.0
+    config.training.loss.mse_weight = 0.0
+    config.training.loss.magnitude_weight = 1.0
     config.training.loss.angle_delay_l1_weight = 0.1
 
     # Disable early stopping / long eval intervals for smoke test.
@@ -174,10 +175,10 @@ def main():
     result = trainer.fit(train_loader, val_loader, epochs=args.epochs)
 
     # Sanity assertions: the loop must finish and produce finite metrics.
-    best_val_nmse = result.get("best_val_nmse", float("nan"))
-    print(f"Best val NMSE (dB): {best_val_nmse:.3f}")
-    assert best_val_nmse < float("inf"), "Validation NMSE diverged to inf"
-    assert not torch.isnan(torch.tensor(best_val_nmse)), "Validation NMSE is NaN"
+    best_val_metric = result.get("best_val_metric", float("nan"))
+    print(f"Best val metric (monitored): {best_val_metric:.3f}")
+    assert best_val_metric < float("inf"), "Validation metric diverged to inf"
+    assert not torch.isnan(torch.tensor(best_val_metric)), "Validation metric is NaN"
     print("Training smoke test passed.")
 
 

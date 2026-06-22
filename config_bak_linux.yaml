@@ -160,12 +160,13 @@ training:
   scheduler: "cosine"
 
   loss:
-    mse_weight: 1.0
+    mse_weight: 0.0          # complex MSE; keep 0 for pure magnitude training
+    magnitude_weight: 1.0    # magnitude MSE: main objective for FDD independent fast fading
     angle_delay_l1_weight: 0.1
 
   early_stopping:
     patience: 10
-    monitor: "val_nmse"
+    monitor: "val_magnitude_nmse_db"  # or "val_nmse_db" if you switch back to complex training
     mode: "min"
 
   logging:

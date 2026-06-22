@@ -38,7 +38,7 @@ DL_CSI_v2/
 │   │   ├── regression_head.py         # MLP head to predict DL CSI
 │   │   └── dl_csi_predictor.py        # end-to-end model (encoders + fusion + head)
 │   ├── training/
-│   │   ├── losses.py                  # MSE + angle-delay L1 loss
+│   │   ├── losses.py                  # complex MSE + magnitude MSE + angle-delay L1 loss
 │   │   └── trainer.py                 # single-stage trainer
 │   └── utils/
 │       ├── logging.py                 # file + TensorBoard logger
@@ -82,8 +82,12 @@ Input
 - **CNN encoders**: 3D convolutions extract local structure from angle-delay CSI tensors; a lightweight Transformer aggregates historical slots.
 - **Transformer fusion**: a small domain-specific Transformer (not a pre-trained LLM) models interactions among the three modality tokens `[current_ul, temporal, env]`.
 - **End-to-end single-stage training**: all components are trainable from the start; no staged freezing or adapter tuning is required.
-- **Loss**: complex MSE in angle-delay domain plus an L1 magnitude consistency loss to preserve large-scale structure.
+- **Loss**: the regression head still predicts complex-valued DL CSI in the angle-delay domain, but the training objective focuses on **magnitude MSE**.  In FDD, UL and DL share large-scale geometry (angles/delays/path powers) yet have independent small-scale phases, so predicting the exact complex channel is infeasible; the magnitude/angle-delay power spectrum is the learnable and useful part.  A small complex-MSE term and an angle-delay L1 consistency term are kept as optional auxiliaries.
 - **Numerics**: model forward uses `bfloat16`; loss computation is always `float32`.
+
+### 3.2 Why magnitude prediction?
+
+The Sionna data generator shares ray geometry between UL and DL but samples independent small-scale gains for the two links.  After per-sample angle-delay normalization, the optimal complex-MSE predictor is essentially zero (NMSE ≈ 0 dB).  The magnitude spectra, however, remain strongly correlated through the shared path powers.  Training on magnitude MSE therefore yields a usable predictor for angle-delay power profiles, which supports scheduling, beam selection, and feedback-compression tasks.  Full complex prediction requires either (a) correlated UL/DL small-scale fading in the data generator, or (b) a phase-residual feedback branch—both are left as explicit extensions.
 
 ---
 

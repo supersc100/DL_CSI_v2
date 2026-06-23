@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.transforms import AngleDelayTransform
+from src.models.sampling_mask import SamplingMaskGenerator
 
 
 class FddCsiDataset(Dataset):
@@ -30,6 +31,10 @@ class FddCsiDataset(Dataset):
             any history fields. This is used for the no-history ablation.
         use_large_scale: If False, the dataset does not load or return the
             large_scale field. This is used for the no-large-scale ablation.
+        phase2_enabled: If True, generate sparse downlink subband samples and
+            sampling masks for Phase 2 training/evaluation.
+        mask_generator: Optional SamplingMaskGenerator for Phase 2.  If None
+            and phase2_enabled is True, a default generator is created.
     """
 
     def __init__(
@@ -40,13 +45,19 @@ class FddCsiDataset(Dataset):
         return_spatial: bool = False,
         use_history: bool = True,
         use_large_scale: bool = True,
+        phase2_enabled: bool = False,
+        mask_generator: Optional[SamplingMaskGenerator] = None,
     ):
         self.h5_path = h5_path
         self.transform = transform or AngleDelayTransform()
         self.load_history = load_history and use_history
-        self.return_spatial = return_spatial
+        self.return_spatial = return_spatial or phase2_enabled
         self.use_history = use_history
         self.use_large_scale = use_large_scale
+        self.phase2_enabled = phase2_enabled
+        self.training = True  # set to False for deterministic validation masks
+        # Phase2 needs large_scale for adaptive sampling even if Stage1 doesn't.
+        self._load_large_scale = use_large_scale or phase2_enabled
 
         if not os.path.exists(h5_path):
             raise FileNotFoundError(f"Dataset file not found: {h5_path}")
@@ -62,6 +73,19 @@ class FddCsiDataset(Dataset):
             else:
                 self.history_window = 0
 
+        if self.phase2_enabled:
+            if mask_generator is None:
+                self.mask_generator = SamplingMaskGenerator(
+                    num_subcarriers=self.num_subcarriers
+                )
+            else:
+                if mask_generator.num_subcarriers != self.num_subcarriers:
+                    raise ValueError(
+                        f"mask_generator M={mask_generator.num_subcarriers} "
+                        f"does not match dataset M={self.num_subcarriers}"
+                    )
+                self.mask_generator = mask_generator
+
     def __len__(self) -> int:
         return self.num_samples
 
@@ -72,7 +96,7 @@ class FddCsiDataset(Dataset):
         with h5py.File(self.h5_path, "r") as f:
             h_ul = np.array(f["h_ul"][idx])
             h_dl = np.array(f["h_dl"][idx])
-            if self.use_large_scale:
+            if self._load_large_scale:
                 large_scale = np.array(f["large_scale"][idx])
             if self.use_history and self.load_history:
                 history_ul = np.array(f["history_ul"][idx])
@@ -88,11 +112,25 @@ class FddCsiDataset(Dataset):
             "h_ul": self._to_tensor(h_ul),
             "h_dl": self._to_tensor(h_dl),
         }
-        if self.use_large_scale:
+        if self._load_large_scale:
             sample["large_scale"] = self._to_tensor(large_scale).float()
         if self.use_history:
             sample["history_ul"] = self._to_tensor(history_ul)
             sample["history_dl"] = self._to_tensor(history_dl)
+
+        # Phase 2: generate sampling mask from UL spatial-frequency energy.
+        if self.phase2_enabled:
+            mask = self.mask_generator(
+                sample["h_ul"],
+                large_scale=sample.get("large_scale"),
+                training=self.training,
+            )
+            sample["sampling_mask"] = mask
+
+            # Create sparse downlink CSI by zeroing unsampled subcarriers.
+            sparse_dl = sample["h_dl"].clone()
+            sparse_dl[:, :, ~mask] = 0.0
+            sample["sparse_dl"] = sparse_dl
 
         # Convert current UL to angle-delay domain for model input.
         h_ul_ad, ul_stats = self.transform(sample["h_ul"])
@@ -101,6 +139,15 @@ class FddCsiDataset(Dataset):
 
         sample["h_ul_ad"] = h_ul_ad
         sample["h_dl_ad"] = h_dl_ad
+
+        if self.phase2_enabled:
+            # Transform sparse DL to angle-delay domain.
+            sparse_dl_ad, sparse_dl_stats = self.transform(sample["sparse_dl"])
+            sample["sparse_dl_ad"] = sparse_dl_ad
+            sample["sparse_dl_stats"] = (
+                sparse_dl_stats if sparse_dl_stats is not None
+                else torch.zeros(2, *sparse_dl_ad.shape)
+            )
 
         if self.use_history:
             # Convert history pairs to angle-delay domain using the same transform.
@@ -123,6 +170,8 @@ class FddCsiDataset(Dataset):
             # Drop raw spatial fields to save memory.
             sample.pop("h_ul", None)
             sample.pop("h_dl", None)
+            if self.phase2_enabled:
+                sample.pop("sparse_dl", None)
             if self.use_history:
                 sample.pop("history_ul", None)
                 sample.pop("history_dl", None)
@@ -139,6 +188,9 @@ def build_dataloader(
     load_history: bool = True,
     use_history: bool = True,
     use_large_scale: bool = True,
+    phase2_enabled: bool = False,
+    mask_generator: Optional[SamplingMaskGenerator] = None,
+    training: bool = True,
     **kwargs: Any,
 ):
     """Create a DataLoader from an H5 dataset."""
@@ -148,7 +200,10 @@ def build_dataloader(
         load_history=load_history,
         use_history=use_history,
         use_large_scale=use_large_scale,
+        phase2_enabled=phase2_enabled,
+        mask_generator=mask_generator,
     )
+    dataset.training = training
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,

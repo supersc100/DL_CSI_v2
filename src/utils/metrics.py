@@ -1,5 +1,5 @@
 """Evaluation metrics for downlink CSI prediction."""
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -81,3 +81,28 @@ def compute_all_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, f
         **compute_metrics(pred, target),
         **compute_magnitude_metrics(pred, target),
     }
+
+
+def phase_nmse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """NMSE computed only on the phase component."""
+    pred = _ensure_float32(pred)
+    target = _ensure_float32(target)
+    pred_phase = pred / (pred.abs().clamp_min(1e-12))
+    target_phase = target / (target.abs().clamp_min(1e-12))
+    diff = pred_phase - target_phase
+    num = diff.abs().square().sum(dim=tuple(range(1, diff.ndim)))
+    den = target.abs().square().sum(dim=tuple(range(1, target.ndim))) + 1e-12
+    return 10.0 * torch.log10((num / den).mean() + 1e-12)
+
+
+def compute_phase2_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mag_stage1: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    """Metrics for Phase2 full-CSI evaluation."""
+    metrics = compute_all_metrics(pred, target)
+    metrics["phase_nmse_db"] = float(phase_nmse(pred, target).item())
+    if mag_stage1 is not None:
+        metrics["magnitude_nmse_db"] = float(nmse(mag_stage1, target.abs()).item())
+    return metrics

@@ -94,7 +94,7 @@ model:
   use_large_scale: true
 
   # Shared feature dimension after local encoders.
-  feature_dim: 512         # dimension after CSI / temporal / env encoders
+  feature_dim: 512         # small dims for fast Stage1 training
 
   # Hidden dimension of the Transformer fusion block.
   # Can equal feature_dim, or be different (a linear projection is added automatically).
@@ -104,7 +104,7 @@ model:
   csi_encoder:
     in_channels: 2         # real & imag concatenated as channels
     base_channels: 64
-    num_layers: 4          # 4 layers; last layer skips pooling on N_rx to avoid collapse
+    num_layers: 4          # matches trained Stage1 checkpoint
     kernel_size: 3
     use_bn: false          # LayerNorm preferred for regression
     dropout: 0.1
@@ -139,8 +139,7 @@ model:
     hidden_dim: 512
     dropout: 0.1
 
-  # Transformer fusion block over the 3 modality tokens.
-  # Replaces the previous frozen DeepSeek-LLM backbone.
+  # Transformer fusion block over the modality tokens.
   transformer_fusion:
     num_layers: 4
     num_heads: 8
@@ -149,7 +148,7 @@ model:
 
   # Regression head -> predicted downlink CSI (angle-delay)
   regression_head:
-    hidden_dim: 1024
+    hidden_dim: 1024        # matches trained Stage1 checkpoint
     dropout: 0.1
     output_mode: "ri"      # "ri" = real+imag concatenated, "amp_phase" = amp/phase
 
@@ -157,7 +156,7 @@ model:
 # Training (single-stage, end-to-end)
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 48
+  batch_size: 32           # Phase2 主训练 batch size；Stage1 已训练完成，32 在 RTX 4090 24 GB 上更稳
   num_workers: 8
   pin_memory: true
   gradient_clip: 1.0
@@ -199,3 +198,102 @@ evaluation:
     - "tdd_oracle"
     - "no_large_scale"
     - "no_history"
+
+# -----------------------------------------------------------------------------
+# Phase 2: Phase Recovery Network
+# -----------------------------------------------------------------------------
+phase2:
+  enabled: true
+  stage1_checkpoint: "./outputs/checkpoints/best.pt"
+
+  model:
+    # Phase2 feature dim.  RTX 4090 24 GB 可支撑 256；若训练稳定且显存仍有 6 GB+
+    # 余量，可进一步提升到 512 以匹配 Stage1。
+    feat_dim: 256
+    sparse_encoder:
+      num_layers: 4
+      kernel_size: 5
+      dropout: 0.1
+    mag_encoder:
+      num_layers: 3
+      kernel_size: 3
+      dropout: 0.1
+    mag_attention:
+      num_heads: 8
+      dropout: 0.1
+    freq_interpolator:
+      num_layers: 6
+      num_heads: 8
+      mlp_ratio: 4.0
+      dropout: 0.05
+    phase_head:
+      hidden_dim: 512
+    use_ul_guidance: false
+
+  sampling:
+    use_adaptive: true
+    base_spacing: 8
+    use_nonuniform_peaks: true
+    peak_prob: 0.7
+    peak_neighbors: 2
+    random_offset: true
+
+  quantization:
+    num_bits: 16
+
+  training:
+    warmup:
+      epochs: 15
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      gradient_clip: 1.0
+      gradient_accumulation: 1
+      loss:
+        mse_weight: 1.0
+        phase_weight: 0.5
+        angle_l1_weight: 0.1
+
+    main:
+      epochs: 80
+      lr: 5.0e-4
+      weight_decay: 1.0e-4
+      gradient_clip: 1.0
+      gradient_accumulation: 2
+      scheduler: "cosine"
+      warmup_ratio: 0.1
+      loss:
+        mse_weight: 1.0
+        phase_weight: 0.5
+        angle_l1_weight: 0.1
+      early_stopping:
+        patience: 12
+        monitor: "nmse_db"
+      logging:
+        eval_interval: 1
+        save_interval: 5
+
+    qat:
+      epochs: 40
+      lr: 2.0e-4
+      weight_decay: 1.0e-4
+      gradient_clip: 1.0
+      gradient_accumulation: 2
+      qat_ratio: 0.8
+      loss:
+        mse_weight: 1.0
+        phase_weight: 0.5
+        angle_l1_weight: 0.1
+      early_stopping:
+        patience: 12
+        monitor: "nmse_db"
+      logging:
+        eval_interval: 1
+        save_interval: 5
+
+  evaluation:
+    batch_size: 32
+    baselines:
+      - "magnitude_only"
+      - "linear_interp"
+      - "dft_interp"
+      - "tdd_oracle"

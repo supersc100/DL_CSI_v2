@@ -17,6 +17,9 @@ def main():
     parser = argparse.ArgumentParser(description="Train CNN+Transformer CSI predictor.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
+    parser.add_argument("--smoke-test", action="store_true", help="Quick run on a small subset.")
+    parser.add_argument("--num-samples", type=int, default=None, help="Limit dataset size for smoke test.")
+    parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -50,6 +53,15 @@ def main():
         use_large_scale=use_large_scale,
     )
 
+    if args.smoke_test:
+        if args.num_samples is not None:
+            train_loader.dataset.num_samples = min(args.num_samples, train_loader.dataset.num_samples)
+            val_loader.dataset.num_samples = min(max(args.num_samples // 4, 4), val_loader.dataset.num_samples)
+        # Default smoke-test subset if not specified.
+        elif train_loader.dataset.num_samples > 256:
+            train_loader.dataset.num_samples = 256
+            val_loader.dataset.num_samples = 64
+
     model = DlCsiPredictor(config)
     logger = Logger(
         log_dir=str(config.project.log_dir),
@@ -61,7 +73,8 @@ def main():
     if args.resume:
         trainer.load_checkpoint(args.resume)
 
-    trainer.fit(train_loader, val_loader)
+    epochs = args.epochs if args.epochs is not None else None
+    trainer.fit(train_loader, val_loader, epochs=epochs)
 
 
 if __name__ == "__main__":

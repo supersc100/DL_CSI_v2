@@ -3,6 +3,8 @@ from typing import Dict, Optional
 
 import torch
 
+import numpy as np
+
 from src.data.transforms import (
     angle_delay_to_spatial,
     real_channels_to_complex,
@@ -75,10 +77,75 @@ def baseline_no_history(
     return baseline_copy_ul(current_ul_ad, target_dl_ad, None)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 baselines
+# ---------------------------------------------------------------------------
+
+def baseline_magnitude_only(
+    stage1_pred: torch.Tensor,
+    target_dl_ad: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Phase2 baseline 1: use Stage1 magnitude, phase = 0."""
+    pred = stage1_pred.abs().to(torch.complex64)
+    return {"pred_ad": pred, "target_ad": target_dl_ad}
+
+
+def baseline_linear_interp(
+    sparse_dl_ad: torch.Tensor,
+    mask: torch.Tensor,
+    target_dl_ad: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Phase2 baseline 2: linear interpolation along subcarrier dimension."""
+    pred = torch.zeros_like(sparse_dl_ad)
+    B, N_tx, N_rx, M = sparse_dl_ad.shape
+    for b in range(B):
+        sampled_indices = mask[b].nonzero(as_tuple=True)[0].cpu().numpy()
+        if len(sampled_indices) < 2:
+            pred[b] = sparse_dl_ad[b]
+            continue
+        sampled_indices = sampled_indices.astype(float)
+        for tx in range(N_tx):
+            for rx in range(N_rx):
+                vals = sparse_dl_ad[b, tx, rx, mask[b]].cpu().numpy()
+                # Linear interpolation for real and imaginary separately.
+                pred_real = np.interp(
+                    np.arange(M), sampled_indices, vals.real, left=vals.real[0], right=vals.real[-1]
+                )
+                pred_imag = np.interp(
+                    np.arange(M), sampled_indices, vals.imag, left=vals.imag[0], right=vals.imag[-1]
+                )
+                pred[b, tx, rx] = torch.complex(
+                    torch.from_numpy(pred_real),
+                    torch.from_numpy(pred_imag),
+                ).to(sparse_dl_ad.device)
+    return {"pred_ad": pred, "target_ad": target_dl_ad}
+
+
+def baseline_dft_interp(
+    sparse_dl_ad: torch.Tensor,
+    mask: torch.Tensor,
+    target_dl_ad: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Phase2 baseline 3: DFT-based interpolation via delay-domain zero padding."""
+    B, N_tx, N_rx, M = sparse_dl_ad.shape
+    flat = sparse_dl_ad.reshape(B * N_tx * N_rx, M)
+    delay = torch.fft.ifft(flat, dim=-1, norm="ortho")
+    # Keep first half of delay taps (typical channel is sparse in delay).
+    keep = M // 2
+    delay[:, keep:] = 0
+    pred_flat = torch.fft.fft(delay, n=M, dim=-1, norm="ortho")
+    pred = pred_flat.reshape(B, N_tx, N_rx, M)
+    return {"pred_ad": pred, "target_ad": target_dl_ad}
+
+
 BASELINES = {
     "copy_ul": baseline_copy_ul,
     "angle_delay_interp": baseline_angle_delay_interp,
     "tdd_oracle": baseline_tdd_oracle,
     "no_large_scale": baseline_no_large_scale,
     "no_history": baseline_no_history,
+    # Phase 2 baselines
+    "magnitude_only": baseline_magnitude_only,
+    "linear_interp": baseline_linear_interp,
+    "dft_interp": baseline_dft_interp,
 }

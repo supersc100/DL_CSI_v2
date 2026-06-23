@@ -65,6 +65,7 @@ data:
     - "bs_ue_distance"      # distance dependent path loss info
 
   # Generation control
+  generate_history: false  # 是否生成历史 CSI；false 可显著减小 H5 体积
   batch_size_per_file: 512 # how many samples to accumulate before flushing to H5
   num_workers: 4           # parallel generation workers (set 0 if TF/Sionna unstable)
   save_ray_info: true      # keep aod/aoa/tau/powers arrays in H5 for debug

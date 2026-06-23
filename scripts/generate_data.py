@@ -28,6 +28,9 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    generate_history = bool(
+        getattr(config.data, "generate_history", getattr(config.model, "use_history", True))
+    )
 
     for split in args.split:
         if split == args.tdd_oracle_split:
@@ -43,7 +46,7 @@ def main():
             base, ext = os.path.splitext(output_path)
             output_path = f"{base}{tag}{ext}"
 
-        print(f"Generating {num_samples} samples for split={split}{tag} ...")
+        print(f"Generating {num_samples} samples for split={split}{tag}, generate_history={generate_history} ...")
         seed_offset = {"train": 0, "val": 1000000, "test": 2000000}[split]
 
         # Use multiprocessing when data.num_workers > 1.
@@ -55,6 +58,7 @@ def main():
                 output_path=output_path,
                 seed_offset=seed_offset,
                 synthesize_ul=not oracle,
+                generate_history=generate_history,
                 num_workers=num_workers,
             )
         else:
@@ -64,6 +68,7 @@ def main():
                 output_path=output_path,
                 seed_offset=seed_offset,
                 synthesize_ul=not oracle,
+                generate_history=generate_history,
             )
         print(f"Saved to {output_path}")
 

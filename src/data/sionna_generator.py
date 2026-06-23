@@ -289,6 +289,7 @@ def _generate_one_sample(
     config: Any,
     rng: np.random.Generator,
     synthesize_ul: bool = True,
+    generate_history: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Generate one FDD UL/DL channel sample."""
     sionna = _import_sionna()
@@ -387,43 +388,45 @@ def _generate_one_sample(
 
     # Time evolution (optional): for history, resample small-scale while keeping
     # large-scale fixed. This produces T correlated slots.
-    history_ul = []
-    history_dl = []
-    for _ in range(history_window):
-        h_cir_t, _, _, _ = _synthesize_cir_from_rays(
-            ray_params_dl, num_tx, num_rx, ul_freq,
-            float(config.data.bandwidth), int(config.data.num_subcarriers), rng,
-        )
-        h_t_ul = _cir_to_frequency_response(
-            h_cir_t, tau_dl, ul_freq,
-            float(config.data.subcarrier_spacing), int(config.data.num_subcarriers),
-        ).transpose(1, 0, 2)
-        history_ul.append(h_t_ul)
-
-        h_cir_t_dl, _, _, _ = _synthesize_cir_from_rays(
-            ray_params_dl, num_tx, num_rx, dl_freq,
-            float(config.data.bandwidth), int(config.data.num_subcarriers), rng,
-        )
-        h_t_dl = _cir_to_frequency_response(
-            h_cir_t_dl, tau_dl, dl_freq,
-            float(config.data.subcarrier_spacing), int(config.data.num_subcarriers),
-        ).transpose(1, 0, 2)
-        history_dl.append(h_t_dl)
-
-    history_ul = np.stack(history_ul, axis=0).astype(np.complex64)  # [T, Tx, Rx, M]
-    history_dl = np.stack(history_dl, axis=0).astype(np.complex64)
-
     sample = {
         "h_ul": h_ul,
         "h_dl": h_dl,
-        "history_ul": history_ul,
-        "history_dl": history_dl,
         "large_scale": large_scale,
         "tau": tau_dl.astype(np.float32),
         "aoa": aoa_dl.astype(np.float32),
         "aod": aod_dl.astype(np.float32),
         "powers": np.asarray(ray_params_dl.get("powers", np.ones_like(tau_dl))).astype(np.float32),
     }
+
+    if generate_history:
+        history_ul = []
+        history_dl = []
+        for _ in range(history_window):
+            h_cir_t, _, _, _ = _synthesize_cir_from_rays(
+                ray_params_dl, num_tx, num_rx, ul_freq,
+                float(config.data.bandwidth), int(config.data.num_subcarriers), rng,
+            )
+            h_t_ul = _cir_to_frequency_response(
+                h_cir_t, tau_dl, ul_freq,
+                float(config.data.subcarrier_spacing), int(config.data.num_subcarriers),
+            ).transpose(1, 0, 2)
+            history_ul.append(h_t_ul)
+
+            h_cir_t_dl, _, _, _ = _synthesize_cir_from_rays(
+                ray_params_dl, num_tx, num_rx, dl_freq,
+                float(config.data.bandwidth), int(config.data.num_subcarriers), rng,
+            )
+            h_t_dl = _cir_to_frequency_response(
+                h_cir_t_dl, tau_dl, dl_freq,
+                float(config.data.subcarrier_spacing), int(config.data.num_subcarriers),
+            ).transpose(1, 0, 2)
+            history_dl.append(h_t_dl)
+
+        history_ul = np.stack(history_ul, axis=0).astype(np.complex64)  # [T, Tx, Rx, M]
+        history_dl = np.stack(history_dl, axis=0).astype(np.complex64)
+        sample["history_ul"] = history_ul
+        sample["history_dl"] = history_dl
+
     return sample
 
 
@@ -433,6 +436,7 @@ def generate_dataset(
     output_path: str,
     seed_offset: int = 0,
     synthesize_ul: bool = True,
+    generate_history: bool = True,
 ) -> None:
     """Generate and save an H5 dataset of FDD UL/DL channel pairs."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -441,55 +445,36 @@ def generate_dataset(
     num_subcarriers = int(config.data.num_subcarriers)
     num_tx = int(config.data.bs_array.num_elements)
     num_rx = int(config.data.ue_array.num_elements)
-    history_window = int(config.data.history_window)
+    history_window = int(config.data.history_window) if generate_history else 0
     num_ls = len(config.data.large_scale_params)
 
     batch_size = int(config.data.batch_size_per_file)
 
     with h5py.File(output_path, "w") as f:
         # Create resizable datasets.
-        ds_h_ul = f.create_dataset(
-            "h_ul", shape=(num_samples, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, num_tx, num_rx, num_subcarriers)
+        datasets = _create_datasets_in_file(
+            f, num_samples, num_tx, num_rx, num_subcarriers, history_window, num_ls,
+            bool(config.data.save_ray_info), generate_history,
         )
-        ds_h_dl = f.create_dataset(
-            "h_dl", shape=(num_samples, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, num_tx, num_rx, num_subcarriers)
-        )
-        ds_history_ul = f.create_dataset(
-            "history_ul", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
-        )
-        ds_history_dl = f.create_dataset(
-            "history_dl", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
-        )
-        ds_large_scale = f.create_dataset(
-            "large_scale", shape=(num_samples, num_ls), dtype=np.float32
-        )
-        if config.data.save_ray_info:
-            ds_tau = f.create_dataset("tau", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
-            ds_aoa = f.create_dataset("aoa", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
-            ds_aod = f.create_dataset("aod", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
-            ds_powers = f.create_dataset("powers", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
 
         for i in range(num_samples):
-            sample = _generate_one_sample(config, rng, synthesize_ul=synthesize_ul)
+            sample = _generate_one_sample(config, rng, synthesize_ul=synthesize_ul, generate_history=generate_history)
             if sample is None:
                 warnings.warn(f"Sample {i} generation failed; skipping.")
                 continue
 
-            ds_h_ul[i] = sample["h_ul"]
-            ds_h_dl[i] = sample["h_dl"]
-            ds_history_ul[i] = sample["history_ul"]
-            ds_history_dl[i] = sample["history_dl"]
-            ds_large_scale[i] = sample["large_scale"]
+            datasets["h_ul"][i] = sample["h_ul"]
+            datasets["h_dl"][i] = sample["h_dl"]
+            if generate_history:
+                datasets["history_ul"][i] = sample["history_ul"]
+                datasets["history_dl"][i] = sample["history_dl"]
+            datasets["large_scale"][i] = sample["large_scale"]
 
             if config.data.save_ray_info:
-                ds_tau[i] = sample["tau"]
-                ds_aoa[i] = sample["aoa"]
-                ds_aod[i] = sample["aod"]
-                ds_powers[i] = sample["powers"]
+                datasets["tau"][i] = sample["tau"]
+                datasets["aoa"][i] = sample["aoa"]
+                datasets["aod"][i] = sample["aod"]
+                datasets["powers"][i] = sample["powers"]
 
             if (i + 1) % batch_size == 0 or i == num_samples - 1:
                 print(f"Generated {i + 1}/{num_samples} samples for {output_path}")
@@ -507,6 +492,7 @@ def _create_datasets_in_file(
     history_window: int,
     num_ls: int,
     save_ray_info: bool,
+    generate_history: bool = True,
 ) -> Dict[str, h5py.Dataset]:
     """Create standard CSI datasets in an open H5 file."""
     datasets: Dict[str, h5py.Dataset] = {
@@ -518,18 +504,19 @@ def _create_datasets_in_file(
             "h_dl", shape=(num_samples, num_tx, num_rx, num_subcarriers),
             dtype=np.complex64, chunks=(1, num_tx, num_rx, num_subcarriers)
         ),
-        "history_ul": f.create_dataset(
-            "history_ul", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
-        ),
-        "history_dl": f.create_dataset(
-            "history_dl", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
-            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
-        ),
         "large_scale": f.create_dataset(
             "large_scale", shape=(num_samples, num_ls), dtype=np.float32
         ),
     }
+    if generate_history:
+        datasets["history_ul"] = f.create_dataset(
+            "history_ul", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
+        )
+        datasets["history_dl"] = f.create_dataset(
+            "history_dl", shape=(num_samples, history_window, num_tx, num_rx, num_subcarriers),
+            dtype=np.complex64, chunks=(1, 1, num_tx, num_rx, num_subcarriers)
+        )
     if save_ray_info:
         datasets["tau"] = f.create_dataset("tau", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
         datasets["aoa"] = f.create_dataset("aoa", shape=(num_samples,), dtype=h5py.vlen_dtype(np.float32))
@@ -538,16 +525,16 @@ def _create_datasets_in_file(
     return datasets
 
 
-def _generate_chunk(args: Tuple[Any, int, int, str, int, bool]) -> str:
+def _generate_chunk(args: Tuple[Any, int, int, str, int, bool, bool]) -> str:
     """Worker entry point: generate one contiguous chunk and write to its own H5.
 
     Args:
-        args: (config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul)
+        args: (config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul, generate_history)
 
     Returns:
         Path to the generated chunk file.
     """
-    config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul = args
+    config, chunk_start, chunk_size, chunk_path, seed_offset, synthesize_ul, generate_history = args
     if chunk_size <= 0:
         return chunk_path
 
@@ -558,25 +545,28 @@ def _generate_chunk(args: Tuple[Any, int, int, str, int, bool]) -> str:
     num_subcarriers = int(config.data.num_subcarriers)
     num_tx = int(config.data.bs_array.num_elements)
     num_rx = int(config.data.ue_array.num_elements)
-    history_window = int(config.data.history_window)
+    history_window = int(config.data.history_window) if generate_history else 0
     num_ls = len(config.data.large_scale_params)
     batch_size = int(config.data.batch_size_per_file)
     save_ray_info = bool(config.data.save_ray_info)
 
     with h5py.File(chunk_path, "w") as f:
         datasets = _create_datasets_in_file(
-            f, chunk_size, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info
+            f, chunk_size, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info, generate_history
         )
         for i in range(chunk_size):
-            sample = _generate_one_sample(config, rng, synthesize_ul=synthesize_ul)
+            sample = _generate_one_sample(
+                config, rng, synthesize_ul=synthesize_ul, generate_history=generate_history
+            )
             if sample is None:
                 warnings.warn(f"Chunk {chunk_start}: sample {i} generation failed; skipping.")
                 continue
 
             datasets["h_ul"][i] = sample["h_ul"]
             datasets["h_dl"][i] = sample["h_dl"]
-            datasets["history_ul"][i] = sample["history_ul"]
-            datasets["history_dl"][i] = sample["history_dl"]
+            if generate_history:
+                datasets["history_ul"][i] = sample["history_ul"]
+                datasets["history_dl"][i] = sample["history_dl"]
             datasets["large_scale"][i] = sample["large_scale"]
 
             if save_ray_info:
@@ -591,19 +581,19 @@ def _generate_chunk(args: Tuple[Any, int, int, str, int, bool]) -> str:
     return chunk_path
 
 
-def _merge_h5_chunks(output_path: str, chunk_paths: List[str], total_samples: int, config: Any) -> None:
+def _merge_h5_chunks(output_path: str, chunk_paths: List[str], total_samples: int, config: Any, generate_history: bool = True) -> None:
     """Merge per-worker chunk H5 files into a single final H5 file."""
     num_subcarriers = int(config.data.num_subcarriers)
     num_tx = int(config.data.bs_array.num_elements)
     num_rx = int(config.data.ue_array.num_elements)
-    history_window = int(config.data.history_window)
+    history_window = int(config.data.history_window) if generate_history else 0
     num_ls = len(config.data.large_scale_params)
     save_ray_info = bool(config.data.save_ray_info)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with h5py.File(output_path, "w") as f:
         datasets = _create_datasets_in_file(
-            f, total_samples, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info
+            f, total_samples, num_tx, num_rx, num_subcarriers, history_window, num_ls, save_ray_info, generate_history
         )
 
         offset = 0
@@ -615,8 +605,9 @@ def _merge_h5_chunks(output_path: str, chunk_paths: List[str], total_samples: in
                 sl = slice(offset, offset + n)
                 datasets["h_ul"][sl] = fc["h_ul"][...]
                 datasets["h_dl"][sl] = fc["h_dl"][...]
-                datasets["history_ul"][sl] = fc["history_ul"][...]
-                datasets["history_dl"][sl] = fc["history_dl"][...]
+                if generate_history:
+                    datasets["history_ul"][sl] = fc["history_ul"][...]
+                    datasets["history_dl"][sl] = fc["history_dl"][...]
                 datasets["large_scale"][sl] = fc["large_scale"][...]
 
                 if save_ray_info:
@@ -642,6 +633,7 @@ def generate_dataset_mp(
     output_path: str,
     seed_offset: int = 0,
     synthesize_ul: bool = True,
+    generate_history: bool = True,
     num_workers: Optional[int] = None,
 ) -> None:
     """Generate an H5 dataset using multiple processes.
@@ -658,7 +650,7 @@ def generate_dataset_mp(
     num_workers = max(1, num_workers)
 
     if num_workers == 1 or num_samples <= 1:
-        generate_dataset(config, num_samples, output_path, seed_offset, synthesize_ul)
+        generate_dataset(config, num_samples, output_path, seed_offset, synthesize_ul, generate_history)
         return
 
     # Cap workers by sample count to avoid empty chunks.
@@ -675,7 +667,7 @@ def generate_dataset_mp(
     remainder = num_samples % num_workers
 
     chunk_paths: List[str] = []
-    pool_args: List[Tuple[Any, int, int, str, int, bool]] = []
+    pool_args: List[Tuple[Any, int, int, str, int, bool, bool]] = []
     start = 0
     for i in range(num_workers):
         size = chunk_size_base + (1 if i < remainder else 0)
@@ -683,7 +675,7 @@ def generate_dataset_mp(
             continue
         chunk_path = os.path.join(chunk_dir, f"chunk_{i:04d}{ext}")
         chunk_paths.append(chunk_path)
-        pool_args.append((config, start, size, chunk_path, seed_offset, synthesize_ul))
+        pool_args.append((config, start, size, chunk_path, seed_offset, synthesize_ul, generate_history))
         start += size
 
     print(f"Generating {num_samples} samples with {len(pool_args)} workers ...")
@@ -695,7 +687,7 @@ def generate_dataset_mp(
         raise
 
     print(f"Merging {len(completed_paths)} chunks into {output_path} ...")
-    _merge_h5_chunks(output_path, completed_paths, num_samples, config)
+    _merge_h5_chunks(output_path, completed_paths, num_samples, config, generate_history)
 
     shutil.rmtree(chunk_dir)
     print(f"Saved merged dataset to {output_path}")
@@ -708,11 +700,22 @@ if __name__ == "__main__":
     parser.add_argument("--split", default="train", choices=["train", "val", "test"])
     parser.add_argument("--seed-offset", type=int, default=0)
     parser.add_argument("--tdd-oracle", action="store_true", help="Use identical UL/DL fast fading (TDD upper bound).")
+    parser.add_argument("--generate-history", action="store_true", default=None, help="Generate historical CSI slots.")
     args = parser.parse_args()
 
     from src.config import load_config
     cfg = load_config(args.config)
 
+    if args.generate_history is None:
+        generate_history = bool(
+            getattr(cfg.data, "generate_history", getattr(cfg.model, "use_history", True))
+        )
+    else:
+        generate_history = args.generate_history
+
     num_samples = int(getattr(cfg.data.samples, args.split))
     output_path = getattr(cfg.data, f"h5_{args.split}")
-    generate_dataset(cfg, num_samples, output_path, seed_offset=args.seed_offset, synthesize_ul=not args.tdd_oracle)
+    generate_dataset(
+        cfg, num_samples, output_path, seed_offset=args.seed_offset,
+        synthesize_ul=not args.tdd_oracle, generate_history=generate_history,
+    )

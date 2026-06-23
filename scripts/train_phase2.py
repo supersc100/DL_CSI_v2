@@ -107,7 +107,11 @@ def main():
     print(f"Phase2 model parameters: {model.count_parameters()}")
 
     # Trainer.
-    logger = Logger(str(config.project.log_dir))
+    logger = Logger(
+        log_dir=str(config.project.log_dir),
+        experiment_name="phase2",
+        use_tensorboard=False,
+    )
     trainer = Phase2Trainer(model, config, logger=logger)
 
     if args.resume is not None:

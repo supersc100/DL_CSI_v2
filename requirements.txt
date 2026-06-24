@@ -13,7 +13,7 @@ h5py>=3.12.0
 # scipy>=1.15.0           # 暂时未使用
 pyyaml>=6.0.2
 tqdm>=4.67.0
-# matplotlib>=3.10.0      # 暂时未使用
+matplotlib>=3.10.0        # 仿真曲线绘图 (scripts/run_simulation.py)
 # seaborn>=0.13.0         # 暂时未使用
 # pandas>=2.2.0           # 暂时未使用
 

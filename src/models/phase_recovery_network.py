@@ -52,6 +52,11 @@ class PhaseRecoveryNetwork(nn.Module):
         p2_cfg = getattr(config, "phase2", {})
         model_cfg = getattr(p2_cfg, "model", {})
         self.feat_dim = int(getattr(model_cfg, "feat_dim", 128))
+        # Ablation switch (Fig 4a): when False, drop the Stage1-magnitude branch
+        # and feed sparse features straight into the frequency interpolator.
+        # Training a checkpoint with this False yields the "no magnitude aid"
+        # ablation curve.
+        self.use_magnitude = bool(getattr(model_cfg, "use_magnitude", True))
 
         sparse_cfg = getattr(model_cfg, "sparse_encoder", {})
         mag_cfg = getattr(model_cfg, "mag_encoder", {})
@@ -66,18 +71,22 @@ class PhaseRecoveryNetwork(nn.Module):
             dropout=float(getattr(sparse_cfg, "dropout", 0.1)),
         )
 
-        self.mag_encoder = MagnitudeEncoder(
-            feat_dim=self.feat_dim,
-            num_layers=int(getattr(mag_cfg, "num_layers", 2)),
-            kernel_size=int(getattr(mag_cfg, "kernel_size", 3)),
-            dropout=float(getattr(mag_cfg, "dropout", 0.1)),
-        )
+        if self.use_magnitude:
+            self.mag_encoder = MagnitudeEncoder(
+                feat_dim=self.feat_dim,
+                num_layers=int(getattr(mag_cfg, "num_layers", 2)),
+                kernel_size=int(getattr(mag_cfg, "kernel_size", 3)),
+                dropout=float(getattr(mag_cfg, "dropout", 0.1)),
+            )
 
-        self.mag_attention = MagnitudeGuidedAttention(
-            feat_dim=self.feat_dim,
-            num_heads=int(getattr(attn_cfg, "num_heads", 4)),
-            dropout=float(getattr(attn_cfg, "dropout", 0.1)),
-        )
+            self.mag_attention = MagnitudeGuidedAttention(
+                feat_dim=self.feat_dim,
+                num_heads=int(getattr(attn_cfg, "num_heads", 4)),
+                dropout=float(getattr(attn_cfg, "dropout", 0.1)),
+            )
+        else:
+            self.mag_encoder = None
+            self.mag_attention = None
 
         self.freq_interpolator = FrequencyInterpolator(
             num_subcarriers=self.num_subcarriers,
@@ -147,8 +156,12 @@ class PhaseRecoveryNetwork(nn.Module):
 
         # Phase2 modules.
         sparse_feat = self.sparse_encoder(sparse_dl_ad, mask)
-        mag_feat = self.mag_encoder(mag_stage1)
-        attended = self.mag_attention(sparse_feat, mag_feat, mag_feat)
+        if self.use_magnitude:
+            mag_feat = self.mag_encoder(mag_stage1)
+            attended = self.mag_attention(sparse_feat, mag_feat, mag_feat)
+        else:
+            # No-magnitude ablation: skip the magnitude-guided branch.
+            attended = sparse_feat
         interp_feat = self.freq_interpolator(attended, mask)
         phase_complex = self.phase_head(interp_feat)
 

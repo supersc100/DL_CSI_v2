@@ -106,3 +106,58 @@ def compute_phase2_metrics(
     if mag_stage1 is not None:
         metrics["magnitude_nmse_db"] = float(nmse(mag_stage1, target.abs()).item())
     return metrics
+
+
+def spectral_efficiency(
+    pred_spatial: torch.Tensor,
+    target_spatial: torch.Tensor,
+    snr_db: float,
+) -> Dict[str, float]:
+    """Single-stream spectral efficiency from predicted CSI used for precoding.
+
+    Operating model (per subcarrier, downlink BS->UE):
+        - ``H[m]`` is the ``[N_rx, N_tx]`` channel matrix.
+        - The BS forms a unit-norm precoder ``w`` from the *predicted* channel
+          (dominant right singular vector / eigen-beamforming).
+        - The achievable rate on the *true* channel is
+          ``log2(1 + snr_lin * ||H_true[m] @ w||^2)`` assuming MRC at the UE.
+        - SE is averaged over subcarriers (and the batch).
+
+    A perfect-CSI upper bound (``w`` from the true channel) is also returned.
+
+    Note: the model operates on per-sample normalized CSI, so the channel power
+    is ~unit and ``snr_db`` is the post-normalization operating SNR.
+
+    Args:
+        pred_spatial: predicted CSI, complex ``[B, N_tx, N_rx, M]``.
+        target_spatial: true CSI, complex ``[B, N_tx, N_rx, M]``.
+        snr_db: operating SNR in dB.
+
+    Returns:
+        dict with ``se_pred`` and ``se_perfect`` (bps/Hz).
+    """
+    pred = _ensure_float32(pred_spatial)
+    target = _ensure_float32(target_spatial)
+    B, N_tx, N_rx, M = pred.shape
+    snr_lin = 10.0 ** (snr_db / 10.0)
+
+    # [B, M, N_rx, N_tx]
+    H_pred = pred.permute(0, 3, 2, 1).reshape(B * M, N_rx, N_tx)
+    H_true = target.permute(0, 3, 2, 1).reshape(B * M, N_rx, N_tx)
+
+    def _dominant_precoder(H: torch.Tensor) -> torch.Tensor:
+        # Right singular vector with largest singular value -> first row of Vh.
+        _, _, Vh = torch.linalg.svd(H, full_matrices=False)
+        w = Vh[:, 0, :].conj()  # [K, N_tx]
+        return w / w.abs().square().sum(dim=-1, keepdim=True).sqrt().clamp_min(1e-12)
+
+    def _se(w: torch.Tensor) -> float:
+        eff = torch.einsum("krt,kt->kr", H_true, w)  # [K, N_rx]
+        gain = eff.abs().square().sum(dim=-1)         # [K] MRC combining
+        rate = torch.log2(1.0 + snr_lin * gain)       # [K]
+        return float(rate.mean().item())
+
+    return {
+        "se_pred": _se(_dominant_precoder(H_pred)),
+        "se_perfect": _se(_dominant_precoder(H_true)),
+    }

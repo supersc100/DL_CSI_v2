@@ -94,17 +94,17 @@ model:
   use_large_scale: true
 
   # Shared feature dimension after local encoders.
-  feature_dim: 512         # small dims for fast Stage1 training
+  feature_dim: 128         # matches trained checkpoints (best.pt / phase2_*_best.pt)
 
   # Hidden dimension of the Transformer fusion block.
   # Can equal feature_dim, or be different (a linear projection is added automatically).
-  hidden_dim: 512
+  hidden_dim: 128
 
   # CSI Encoder: current uplink CSI in angle-delay domain
   csi_encoder:
     in_channels: 2         # real & imag concatenated as channels
-    base_channels: 64
-    num_layers: 4          # matches trained Stage1 checkpoint
+    base_channels: 16      # matches trained Stage1 checkpoint
+    num_layers: 2          # matches trained Stage1 checkpoint
     kernel_size: 3
     use_bn: false          # LayerNorm preferred for regression
     dropout: 0.1
@@ -129,26 +129,26 @@ model:
   env_encoder:
     input_dim: 6           # must match len(data.large_scale_params)
     hidden_dims: [128, 256]
-    output_dim: 512        # matches feature_dim
+    output_dim: 128        # overridden by feature_dim in code; kept for clarity
     dropout: 0.1
 
   # Cross-attention fusion (optional)
   fusion:
     use_cross_attention: true
     num_heads: 8
-    hidden_dim: 512
+    hidden_dim: 128
     dropout: 0.1
 
   # Transformer fusion block over the modality tokens.
   transformer_fusion:
-    num_layers: 4
+    num_layers: 2          # matches trained Stage1 checkpoint
     num_heads: 8
     mlp_ratio: 4.0
     dropout: 0.1
 
   # Regression head -> predicted downlink CSI (angle-delay)
   regression_head:
-    hidden_dim: 1024        # matches trained Stage1 checkpoint
+    hidden_dim: 256         # matches trained Stage1 checkpoint
     dropout: 0.1
     output_mode: "ri"      # "ri" = real+imag concatenated, "amp_phase" = amp/phase
 
@@ -207,27 +207,26 @@ phase2:
   stage1_checkpoint: "./outputs/checkpoints/best.pt"
 
   model:
-    # Phase2 feature dim.  RTX 4090 24 GB 可支撑 256；若训练稳定且显存仍有 6 GB+
-    # 余量，可进一步提升到 512 以匹配 Stage1。
-    feat_dim: 256
+    # Phase2 feature dim. Matches trained phase2_*_best.pt checkpoints.
+    feat_dim: 128
     sparse_encoder:
-      num_layers: 4
+      num_layers: 3        # matches trained Stage2 checkpoint
       kernel_size: 5
       dropout: 0.1
     mag_encoder:
-      num_layers: 3
+      num_layers: 2        # matches trained Stage2 checkpoint
       kernel_size: 3
       dropout: 0.1
     mag_attention:
       num_heads: 8
       dropout: 0.1
     freq_interpolator:
-      num_layers: 6
+      num_layers: 4        # matches trained Stage2 checkpoint
       num_heads: 8
       mlp_ratio: 4.0
       dropout: 0.05
     phase_head:
-      hidden_dim: 512
+      hidden_dim: 256       # matches trained Stage2 checkpoint
     use_ul_guidance: false
     # Ablation switch (simPlan 2.1 fig 4a). Keep true for the proposed model.
     # Set false and retrain to produce the "no magnitude aid" ablation curve.

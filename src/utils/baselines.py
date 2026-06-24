@@ -121,6 +121,22 @@ def baseline_linear_interp(
     return {"pred_ad": pred, "target_ad": target_dl_ad}
 
 
+def baseline_full_feedback(
+    target_dl_ad: torch.Tensor,
+    quantizer=None,
+) -> Dict[str, torch.Tensor]:
+    """Phase2 baseline (upper bound): full-band DL CSI fed back directly.
+
+    Represents an ideal feedback scheme that returns the complete downlink CSI
+    (optionally passed through a scalar quantizer to model limited feedback).
+    Serves as the "full feedback" performance ceiling in NMSE-vs-SNR plots.
+    """
+    pred = target_dl_ad.clone()
+    if quantizer is not None:
+        pred = quantizer(pred)
+    return {"pred_ad": pred, "target_ad": target_dl_ad}
+
+
 def baseline_dft_interp(
     sparse_dl_ad: torch.Tensor,
     mask: torch.Tensor,
@@ -148,4 +164,5 @@ BASELINES = {
     "magnitude_only": baseline_magnitude_only,
     "linear_interp": baseline_linear_interp,
     "dft_interp": baseline_dft_interp,
+    "full_feedback": baseline_full_feedback,
 }

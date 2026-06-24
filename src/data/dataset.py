@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 
 from src.data.transforms import AngleDelayTransform
 from src.models.sampling_mask import SamplingMaskGenerator
+from src.utils.channel_noise import add_awgn
 
 
 class FddCsiDataset(Dataset):
@@ -56,6 +57,11 @@ class FddCsiDataset(Dataset):
         self.use_large_scale = use_large_scale
         self.phase2_enabled = phase2_enabled
         self.training = True  # set to False for deterministic validation masks
+        # Eval-time AWGN injection (None = clean).  When set, noise is added to
+        # the UL input and the DL sparse pilots; the supervision target stays
+        # clean.  noise_base_seed makes the per-sample noise reproducible.
+        self.snr_db: Optional[float] = None
+        self.noise_base_seed: int = 0
         # Phase2 needs large_scale for adaptive sampling even if Stage1 doesn't.
         self._load_large_scale = use_large_scale or phase2_enabled
 
@@ -118,6 +124,14 @@ class FddCsiDataset(Dataset):
             sample["history_ul"] = self._to_tensor(history_ul)
             sample["history_dl"] = self._to_tensor(history_dl)
 
+        # Optional eval-time AWGN.  The mask above is generated from the *clean*
+        # UL energy so that sampled positions stay fixed across SNR points; noise
+        # is only added to the measured signals (UL input, DL sparse pilots).
+        noise_gen = None
+        if self.snr_db is not None:
+            noise_gen = torch.Generator()
+            noise_gen.manual_seed(int(self.noise_base_seed) + int(idx))
+
         # Phase 2: generate sampling mask from UL spatial-frequency energy.
         if self.phase2_enabled:
             mask = self.mask_generator(
@@ -128,13 +142,21 @@ class FddCsiDataset(Dataset):
             sample["sampling_mask"] = mask
 
             # Create sparse downlink CSI by zeroing unsampled subcarriers.
-            sparse_dl = sample["h_dl"].clone()
+            # Under AWGN, the sampled pilots are noisy observations of h_dl.
+            dl_measured = sample["h_dl"]
+            if self.snr_db is not None:
+                dl_measured = add_awgn(dl_measured, self.snr_db, generator=noise_gen)
+            sparse_dl = dl_measured.clone()
             sparse_dl[:, :, ~mask] = 0.0
             sample["sparse_dl"] = sparse_dl
 
-        # Convert current UL to angle-delay domain for model input.
-        h_ul_ad, ul_stats = self.transform(sample["h_ul"])
-        # Convert target DL to angle-delay domain for supervision.
+        # Convert current UL to angle-delay domain for model input.  Add noise to
+        # the UL estimate (Stage1 input) when an SNR is configured.
+        ul_input = sample["h_ul"]
+        if self.snr_db is not None:
+            ul_input = add_awgn(ul_input, self.snr_db, generator=noise_gen)
+        h_ul_ad, ul_stats = self.transform(ul_input)
+        # Convert target DL to angle-delay domain for supervision (always clean).
         h_dl_ad, dl_stats = self.transform(sample["h_dl"])
 
         sample["h_ul_ad"] = h_ul_ad
@@ -191,6 +213,8 @@ def build_dataloader(
     phase2_enabled: bool = False,
     mask_generator: Optional[SamplingMaskGenerator] = None,
     training: bool = True,
+    snr_db: Optional[float] = None,
+    noise_base_seed: int = 0,
     **kwargs: Any,
 ):
     """Create a DataLoader from an H5 dataset."""
@@ -204,6 +228,8 @@ def build_dataloader(
         mask_generator=mask_generator,
     )
     dataset.training = training
+    dataset.snr_db = snr_db
+    dataset.noise_base_seed = noise_base_seed
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,

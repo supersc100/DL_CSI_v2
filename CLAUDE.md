@@ -378,6 +378,46 @@ python scripts/evaluate_phase2.py \
 
 Planned ablations (`no_magnitude`, `no_ul_guidance`) are supported by constructing the corresponding `PhaseRecoveryNetwork` variant and comparing checkpoints.
 
+### 7.5 Paper Simulation Curves (SNR / overhead sweeps)
+
+`scripts/run_simulation.py` produces the figures in `researchPlan/simPlan.md` by injecting
+AWGN and switching pilot overhead / sampling strategy **at evaluation time**, reusing trained
+checkpoints (no regeneration / retraining for the SNR and overhead sweeps). See
+`researchPlan/simRun.md` for exact commands.
+
+```bash
+# NMSE vs SNR (1.1), with 16-bit quantized-pilot curve
+python scripts/run_simulation.py --figure nmse_snr \
+    --checkpoint outputs/checkpoints/phase2_main_best.pt --quant-curve
+# NMSE vs pilot overhead (1.2)
+python scripts/run_simulation.py --figure nmse_overhead \
+    --checkpoint outputs/checkpoints/phase2_main_best.pt
+# Spectral efficiency vs SNR (1.3)
+python scripts/run_simulation.py --figure se_snr \
+    --checkpoint outputs/checkpoints/phase2_main_best.pt
+# Sampling-strategy ablation vs overhead (2.1 fig 4c)
+python scripts/run_simulation.py --figure sampling_overhead \
+    --checkpoint outputs/checkpoints/phase2_main_best.pt
+```
+
+Each figure writes `outputs/sim/results_<figure>.csv` and `fig_<figure>.png`. Sweep grids,
+fixed SNR, seeds (error bars), and output dir live in the `simulation:` config section.
+
+- **Noise injection**: `src/utils/channel_noise.add_awgn`, wired into `FddCsiDataset` via the
+  `snr_db` / `noise_base_seed` attributes (set by `build_dataloader(..., snr_db=...)`). Noise is
+  added to the UL input and the DL sparse pilots; the supervision target stays clean.
+- **Spectral efficiency**: `src/utils/metrics.spectral_efficiency` (single-stream eigen-beamforming
+  on per-sample-normalized channels, plus a perfect-CSI upper bound).
+- **Sampling strategies / overhead**: `src/models/sampling_mask.make_mask_generator`
+  (`uniform` / `nonuniform` / `adaptive`) and `overhead_to_spacing`.
+  The `sampling_overhead` figure uses a fair ablation: all three curves share the
+  same delay-spread-adaptive base grid and differ only in the peak encryption
+  strategy (none / random / energy-guided).
+- **`use_magnitude` ablation (fig 4a)**: `phase2.model.use_magnitude: false` drops the
+  Stage1-magnitude branch in `PhaseRecoveryNetwork`; requires training a separate checkpoint.
+- **Config must match the checkpoint**: model dims in `config.yaml` must equal those used at
+  training time, or checkpoint loading raises a size mismatch.
+
 ---
 
 ## 8. Configuration Reference
@@ -455,7 +495,8 @@ Before first run, update at least:
 - The current generator does not model UE mobility across slots inside one sample; it resamples fast fading independently per slot.
 - Windows multiprocessing with H5 can be fragile; reduce `num_workers` to 0 if DataLoader hangs.
 - Stage 2 structural-prior fusion from UL CSI (`use_ul_guidance`) is left as an optional extension; the interface is reserved in `config.yaml` but not implemented.
-- Stage 2 ablation baselines (`no_magnitude`, `no_ul_guidance`) require running separate model variants; they are not yet automated in `evaluate_phase2.py`.
+- Stage 2 ablation baselines (`no_magnitude`, `no_ul_guidance`) require running separate model variants. The `no_magnitude` variant is wired via `phase2.model.use_magnitude: false` (train a separate checkpoint); `no_ul_guidance` remains a reserved interface.
+- Iso-overhead fairness in the sampling-strategy comparison (`sampling_overhead`): peak encryption *adds* a fixed neighbor budget, so `nonuniform`/`adaptive` sample more points than `uniform` at the same nominal overhead. A budget-constrained (peak-replacing) mask would be needed for a strict equal-overhead comparison.
 
 ---
 

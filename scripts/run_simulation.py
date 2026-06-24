@@ -187,6 +187,113 @@ def eval_baseline_stage2(model, loader, device, name, compute_se, se_snr,
     return {k: v / max(n, 1) for k, v in agg.items()}
 
 
+def _update_metrics(agg, metrics, compute_se, pred, target, se_snr):
+    """Add a batch of metrics (and optionally SE) to an aggregate dict."""
+    for k, v in metrics.items():
+        agg[k] = agg.get(k, 0.0) + v
+    if compute_se:
+        pred_sp = angle_delay_to_spatial(pred)
+        tgt_sp = angle_delay_to_spatial(target)
+        for k, v in spectral_efficiency(pred_sp, tgt_sp, se_snr).items():
+            agg[k] = agg.get(k, 0.0) + v
+
+
+@torch.no_grad()
+def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
+                    quantizer=None, full_fb_quantizer=None):
+    """Evaluate multiple Stage2 curves in a **single pass** over ``loader``.
+
+    This avoids re-reading the H5 file and re-running the model for every
+    baseline, which is the main bottleneck for ``nmse_snr`` and
+    ``nmse_overhead``.
+
+    Supported curve names: proposed, proposed_quant, magnitude_only,
+    linear_interp, dft_interp, tdd_oracle, full_feedback.
+    """
+    model.eval()
+    aggs = {c: {} for c in curves}
+    n = 0
+    for batch in loader:
+        b = _to_device(batch, device)
+        target = b["h_dl_ad"]
+        h_ul = b["h_ul_ad"]
+        sparse = b["sparse_dl_ad"]
+        mask = b["sampling_mask"]
+        large_scale = b["large_scale"]
+        history_ul = b["history_ul_ad"]
+        history_dl = b["history_dl_ad"]
+
+        # Proposed model (and optionally its quantized-pilot variant).
+        if "proposed" in curves or "proposed_quant" in curves:
+            pred, aux = model(
+                h_ul, sparse, mask,
+                large_scale=large_scale,
+                history_ul_ad=history_ul, history_dl_ad=history_dl,
+            )
+            if "proposed" in curves:
+                _update_metrics(
+                    aggs["proposed"],
+                    compute_phase2_metrics(pred, target, aux["mag_stage1"]),
+                    compute_se, pred, target, se_snr)
+            if "proposed_quant" in curves:
+                sparse_q = quantizer(sparse)
+                pred_q, aux_q = model(
+                    h_ul, sparse_q, mask,
+                    large_scale=large_scale,
+                    history_ul_ad=history_ul, history_dl_ad=history_dl,
+                )
+                _update_metrics(
+                    aggs["proposed_quant"],
+                    compute_phase2_metrics(pred_q, target, aux_q["mag_stage1"]),
+                    compute_se, pred_q, target, se_snr)
+
+        # Stage1-magnitude-only baseline (needs one Stage1 forward).
+        if "magnitude_only" in curves:
+            s1_kwargs = {}
+            if model.stage1.use_large_scale:
+                s1_kwargs["large_scale"] = large_scale
+            if model.stage1.use_history:
+                s1_kwargs["history_ul_ad"] = history_ul
+                s1_kwargs["history_dl_ad"] = history_dl
+            stage1_pred = model.stage1(h_ul, **s1_kwargs)
+            pred_mag = BASELINES["magnitude_only"](stage1_pred, target)["pred_ad"]
+            _update_metrics(
+                aggs["magnitude_only"],
+                compute_phase2_metrics(pred_mag, target),
+                compute_se, pred_mag, target, se_snr)
+
+        # Interpolation baselines.
+        if "linear_interp" in curves:
+            pred_li = BASELINES["linear_interp"](sparse, mask, target)["pred_ad"]
+            _update_metrics(
+                aggs["linear_interp"],
+                compute_phase2_metrics(pred_li, target),
+                compute_se, pred_li, target, se_snr)
+        if "dft_interp" in curves:
+            pred_di = BASELINES["dft_interp"](sparse, mask, target)["pred_ad"]
+            _update_metrics(
+                aggs["dft_interp"],
+                compute_phase2_metrics(pred_di, target),
+                compute_se, pred_di, target, se_snr)
+
+        # Oracle / ceiling baselines.
+        if "tdd_oracle" in curves:
+            pred_to = BASELINES["tdd_oracle"](h_ul, target)["pred_ad"]
+            _update_metrics(
+                aggs["tdd_oracle"],
+                compute_phase2_metrics(pred_to, target),
+                compute_se, pred_to, target, se_snr)
+        if "full_feedback" in curves:
+            pred_fb = BASELINES["full_feedback"](target, full_fb_quantizer)["pred_ad"]
+            _update_metrics(
+                aggs["full_feedback"],
+                compute_phase2_metrics(pred_fb, target),
+                compute_se, pred_fb, target, se_snr)
+
+        n += 1
+    return {c: {k: v / max(n, 1) for k, v in aggs[c].items()} for c in curves}
+
+
 # ---------------------------------------------------------------------------
 # Stage1 evaluation (magnitude NMSE)
 # ---------------------------------------------------------------------------
@@ -248,23 +355,17 @@ def run_nmse_snr(args, config, transform, device, h5_path):
     if args.quant_curve:
         curves.insert(1, "proposed_quant")
 
-    rows = []  # (curve, x, metric, mean, std)
+    rows = []
     for snr in snr_list:
         per_curve = {c: [] for c in curves}
         for sd in seeds:
             loader = build_loader(config, transform, h5_path, _eval_mask(config),
                                   snr, sd, args.num_samples, phase2=True)
-            base = eval_model_stage2(model, loader, device, False, 0.0)
-            per_curve["proposed"].append(base["nmse_db"])
-            if "proposed_quant" in per_curve:
-                mq = eval_model_stage2(model, loader, device, False, 0.0, quant)
-                per_curve["proposed_quant"].append(mq["nmse_db"])
-            for name in ("magnitude_only", "linear_interp", "tdd_oracle",
-                         "full_feedback"):
-                fb_q = quant if name == "full_feedback" else None
-                bm = eval_baseline_stage2(model, loader, device, name, False, 0.0,
-                                          full_fb_quantizer=fb_q)
-                per_curve[name].append(bm["nmse_db"])
+            results = eval_all_stage2(
+                model, loader, device, curves, compute_se=False, se_snr=0.0,
+                quantizer=quant, full_fb_quantizer=quant)
+            for c in curves:
+                per_curve[c].append(results[c]["nmse_db"])
         rows.extend(_reduce_rows(per_curve, snr, "nmse_db"))
         print(f"[nmse_snr] SNR={snr:>4} dB done")
     return rows, "SNR (dB)", "NMSE (dB)"
@@ -319,39 +420,37 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
         # nominal-overhead axis, reaches lower overheads). Selected via
         # --overhead-strategy.
         mg = make_mask_generator(args.overhead_strategy, M, target_overhead=ov)
-        per_curve = {c: [] for c in swept}
-        tdd_seed = []
+        # Evaluate all overhead-dependent curves in one pass per seed.
+        loader_curves = list(swept)
+        if "tdd_oracle" not in loader_curves:
+            loader_curves.append("tdd_oracle")
+        per_curve = {c: [] for c in loader_curves}
         for sd in seeds:
             loader = build_loader(config, transform, h5_path, mg, snr, sd,
                                   args.num_samples, phase2=True)
             actual_ov, _ = measure_overhead(loader)
-            base = eval_model_stage2(model, loader, device, False, 0.0)
-            per_curve["proposed"].append(base["nmse_db"])
-            if "proposed_quant" in per_curve:
-                per_curve["proposed_quant"].append(
-                    eval_model_stage2(model, loader, device, False, 0.0, quant)["nmse_db"])
-            per_curve["linear_interp"].append(
-                eval_baseline_stage2(model, loader, device, "linear_interp", False, 0.0)["nmse_db"])
-            tdd_seed.append(
-                eval_baseline_stage2(model, loader, device, "tdd_oracle", False, 0.0)["nmse_db"])
+            results = eval_all_stage2(
+                model, loader, device, loader_curves, compute_se=False,
+                quantizer=quant, full_fb_quantizer=quant)
+            for c in loader_curves:
+                per_curve[c].append(results[c]["nmse_db"])
         x = round(actual_ov * 100, 2)
         rows.extend(_reduce_rows(per_curve, x, "nmse_db"))
-        # tdd_oracle: emit at every swept x so it renders as a flat ceiling line.
-        rows.extend(_reduce_rows({"tdd_oracle": tdd_seed}, x, "nmse_db"))
         print(f"[nmse_overhead] overhead~{actual_ov*100:.1f}% done")
 
     # Anchor points (pilot-independent): magnitude_only @ 0%, full_feedback @ 100%.
-    anchor_mag, anchor_fb = [], []
+    anchor_curves = ["magnitude_only", "full_feedback"]
+    anchor_results = {c: [] for c in anchor_curves}
     for sd in seeds:
         loader = build_loader(config, transform, h5_path, _eval_mask(config), snr, sd,
                               args.num_samples, phase2=True)
-        anchor_mag.append(
-            eval_baseline_stage2(model, loader, device, "magnitude_only", False, 0.0)["nmse_db"])
-        anchor_fb.append(
-            eval_baseline_stage2(model, loader, device, "full_feedback", False, 0.0,
-                                 full_fb_quantizer=quant)["nmse_db"])
-    rows.extend(_reduce_rows({"magnitude_only": anchor_mag}, 0.0, "nmse_db"))
-    rows.extend(_reduce_rows({"full_feedback": anchor_fb}, 100.0, "nmse_db"))
+        res = eval_all_stage2(
+            model, loader, device, anchor_curves, compute_se=False,
+            full_fb_quantizer=quant)
+        for c in anchor_curves:
+            anchor_results[c].append(res[c]["nmse_db"])
+    rows.extend(_reduce_rows({"magnitude_only": anchor_results["magnitude_only"]}, 0.0, "nmse_db"))
+    rows.extend(_reduce_rows({"full_feedback": anchor_results["full_feedback"]}, 100.0, "nmse_db"))
     print("[nmse_overhead] anchors: magnitude_only@0%, full_feedback@100% done")
     return rows, "Pilot overhead (%)", "NMSE (dB)"
 

@@ -195,7 +195,6 @@ evaluation:
   baselines:
     - "copy_ul"
     - "angle_delay_interp"
-    - "tdd_oracle"
     - "no_large_scale"
     - "no_history"
 
@@ -299,7 +298,6 @@ phase2:
       - "magnitude_only"
       - "linear_interp"
       - "dft_interp"
-      - "tdd_oracle"
 
 # -----------------------------------------------------------------------------
 # Simulation sweeps (scripts/run_simulation.py) -> paper curves

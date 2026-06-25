@@ -21,8 +21,8 @@ D:/anaconda/envs/csiMinimax/python.exe scripts/run_simulation.py \
     --checkpoint outputs/checkpoints/phase2_main_best.pt \
     --quant-curve
 ```
-- 曲线：所提(理想)、所提(16-bit 量化)、仅幅度(`magnitude_only`)、线性插值(`linear_interp`)、
-  TDD 上界(`tdd_oracle`)、全反馈(`full_feedback`)。
+- 曲线：所提(理想)、所提量化(`proposed_quant_{N}bit`)、仅幅度(`magnitude_only`)、线性插值(`linear_interp`)、
+  DFT插值(`dft_interp`)、全反馈(`full_feedback`)。
 - `--quant-curve` 增加 16-bit 量化导频那条；横轴 SNR 由 `simulation.snr_list` 控制。
 - 误差棒：`simulation.seeds`（默认 3 个种子，对应 3 次噪声实现）。
 
@@ -45,8 +45,7 @@ D:/anaconda/envs/csiMinimax/python.exe scripts/run_simulation.py \
   - `uniform`：纯均匀网格，贴近名义开销、能画到更低的开销段（如 6.25%），代价是离训练分布更远（更 OOD）。
 - CSV 的 `x` 列是脚本实测的**实际开销%**（含峰值加密的固定预算，故实际值高于名义值），非名义目标值。
 - **曲线构成（方案1，区分"吃导频"与"参考线"）**：
-  - `proposed` / `proposed_quant` / `linear_interp`：真正消费稀疏导频，随开销变化的扫描曲线；
-  - `tdd_oracle`：与导频无关的物理天花板，画成**水平参考线**；
+  - `proposed` / `proposed_quant_{N}bit` / `linear_interp` / `dft_interp`：真正消费稀疏导频，随开销变化的扫描曲线；
   - `magnitude_only`：0% 开销锚点（无 DL 导频、phase=0），单点 @ x=0；
   - `full_feedback`：100% 开销锚点（全带 CSI 以 16-bit 反馈），单点 @ x=100。
 - 反馈比特数横轴：`bits = 采样子载波数 × N_tx × N_rx × 2 × num_bits`，可由 CSV 的实际开销换算后另绘。

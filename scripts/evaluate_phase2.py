@@ -119,8 +119,6 @@ def evaluate_baselines(model, dataloader, device, baselines):
             elif name in ("linear_interp", "dft_interp"):
                 kwargs["sparse_dl_ad"] = batch["sparse_dl_ad"].to(device)
                 kwargs["mask"] = batch["sampling_mask"].to(device)
-            elif name == "tdd_oracle":
-                kwargs["current_ul_ad"] = batch["h_ul_ad"].to(device)
             else:
                 # Skip unsupported baselines for Phase2 eval.
                 continue

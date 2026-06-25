@@ -142,16 +142,68 @@ def baseline_dft_interp(
     mask: torch.Tensor,
     target_dl_ad: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
-    """Phase2 baseline 3: DFT-based interpolation via delay-domain zero padding."""
+    """Phase2 baseline 3: mask-aware DFT interpolation for sparse OFDM pilots.
+
+    The sampling mask is defined in the spatial-frequency domain, so the input
+    (which is in the angle-delay domain) is first transformed back to the
+    angle-frequency domain via FFT along subcarriers. A delay-domain least-squares
+    problem is solved from the observed pilot indices, the full frequency response
+    is reconstructed, and the result is transformed back to angle-delay domain.
+    Works for both uniform and non-uniform sampling masks.
+    """
     B, N_tx, N_rx, M = sparse_dl_ad.shape
-    flat = sparse_dl_ad.reshape(B * N_tx * N_rx, M)
-    delay = torch.fft.ifft(flat, dim=-1, norm="ortho")
-    # Keep first half of delay taps (typical channel is sparse in delay).
-    keep = M // 2
-    delay[:, keep:] = 0
-    pred_flat = torch.fft.fft(delay, n=M, dim=-1, norm="ortho")
-    pred = pred_flat.reshape(B, N_tx, N_rx, M)
-    return {"pred_ad": pred, "target_ad": target_dl_ad}
+    device = sparse_dl_ad.device
+    dtype = sparse_dl_ad.dtype
+
+    # Transform to angle-frequency domain, where the mask has meaning.
+    sparse_af = torch.fft.fft(sparse_dl_ad, n=M, dim=-1, norm="ortho")
+    pred_af = torch.zeros_like(sparse_af)
+
+    # Collate yields [B, M]; support [M] shared mask for backward compatibility.
+    if mask.dim() == 1:
+        mask = mask.unsqueeze(0).expand(B, -1)
+
+    N_spatial = N_tx * N_rx
+    for b in range(B):
+        mask_b = mask[b]
+        sampled_indices = mask_b.nonzero(as_tuple=True)[0].to(torch.float32)
+        K = sampled_indices.numel()
+        if K == 0:
+            continue
+
+        # Effective delay taps: cap at M//2 (delay-sparse prior).
+        L = min(K, M // 2)
+        if L < 1:
+            L = 1
+
+        # Partial DFT matrix A[k, l] = (1/sqrt(M)) * exp(-j * 2π * m_k * l / M)
+        # to match torch.fft.fft with norm="ortho".
+        l_range = torch.arange(L, device=device, dtype=torch.float32)
+        phase = -2.0 * torch.pi * torch.outer(sampled_indices, l_range) / M
+        A = torch.exp(1j * phase).to(dtype) / (M ** 0.5)  # [K, L]
+
+        # Sampled values for all TX/RX (angle-frequency): [N_spatial, K]
+        y = sparse_af[b].reshape(N_spatial, M)[:, mask_b]
+
+        # Tikhonov-regularized least squares for numerical stability under noise.
+        # h = (A^H A + λ I)^{-1} A^H y.  We compute B = (A^H A + λI)^{-1} A^H
+        # (shape [L, K]) and then h = y @ B.T.
+        A_H = A.conj().T  # [L, K]
+        AHA = A_H @ A  # [L, L]
+        reg = 1e-4 * torch.eye(L, device=device, dtype=dtype)
+        B = torch.linalg.solve(AHA + reg, A_H)  # [L, K]
+        h_ls = y @ B.T.to(dtype)  # [N_spatial, L]
+
+        # Zero-pad to M delay taps, FFT back to angle-frequency domain.
+        h_full = torch.zeros(N_spatial, M, dtype=dtype, device=device)
+        h_full[:, :L] = h_ls
+        pred_af[b] = torch.fft.fft(h_full, n=M, dim=-1, norm="ortho").reshape(
+            N_tx, N_rx, M
+        )
+
+    # Transform back to angle-delay domain.
+    pred_ad = torch.fft.ifft(pred_af, n=M, dim=-1, norm="ortho")
+    return {"pred_ad": pred_ad, "target_ad": target_dl_ad}
 
 
 BASELINES = {

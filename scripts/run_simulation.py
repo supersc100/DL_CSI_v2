@@ -200,8 +200,6 @@ def eval_baseline_stage2(model, loader, device, name, compute_se, se_snr,
             kwargs["mask"] = b["sampling_mask"]
         elif name == "full_feedback":
             kwargs["quantizer"] = full_fb_quantizer
-        elif name == "tdd_oracle":
-            kwargs["current_ul_ad"] = b["h_ul_ad"]
         else:
             continue
         pred = BASELINES[name](**kwargs)["pred_ad"]
@@ -236,7 +234,7 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
     ``nmse_overhead``.
 
     Supported curve names: proposed, proposed_quant_{N}bit, magnitude_only,
-    linear_interp, dft_interp, tdd_oracle, full_feedback.
+    linear_interp, dft_interp, full_feedback.
     """
     model.eval()
     aggs = {c: {} for c in curves}
@@ -305,13 +303,7 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
                 compute_phase2_metrics(pred_di, target),
                 compute_se, pred_di, target, se_snr)
 
-        # Oracle / ceiling baselines.
-        if "tdd_oracle" in curves:
-            pred_to = BASELINES["tdd_oracle"](h_ul, target)["pred_ad"]
-            _update_metrics(
-                aggs["tdd_oracle"],
-                compute_phase2_metrics(pred_to, target),
-                compute_se, pred_to, target, se_snr)
+        # Full-feedback ceiling baseline.
         if "full_feedback" in curves:
             pred_fb = BASELINES["full_feedback"](target, full_fb_quantizer)["pred_ad"]
             _update_metrics(
@@ -380,7 +372,7 @@ def run_nmse_snr(args, config, transform, device, h5_path):
     quant_bits = _resolve_quant_bits(args, config)
     quantizers = _build_quantizers(quant_bits) if quant_bits else None
 
-    curves = ["proposed", "magnitude_only", "linear_interp", "tdd_oracle",
+    curves = ["proposed", "magnitude_only", "linear_interp", "dft_interp",
               "full_feedback"]
     if quant_bits:
         for q_curve in reversed(list(quantizers.keys())):
@@ -435,11 +427,11 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
     M = int(config.data.num_subcarriers)
 
     # Curves that actually consume the sparse pilots and therefore vary with
-    # overhead.  tdd_oracle / full_feedback / magnitude_only do NOT use pilots,
-    # so they are not swept: tdd_oracle is drawn as a flat ceiling reference,
+    # overhead.  dft_interp / linear_interp are pilot-interpolation baselines;
+    # full_feedback / magnitude_only do NOT use pilots, so they are not swept:
     # magnitude_only is the 0%-overhead anchor (phase=0, no DL pilots), and
     # full_feedback is the 100%-overhead anchor (full-band CSI fed back).
-    swept = ["proposed", "linear_interp"]
+    swept = ["proposed", "linear_interp", "dft_interp"]
     if quant_bits:
         for q_curve in reversed(list(quantizers.keys())):
             swept.insert(1, q_curve)
@@ -456,8 +448,6 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
         mg = make_mask_generator(args.overhead_strategy, M, target_overhead=ov)
         # Evaluate all overhead-dependent curves in one pass per seed.
         loader_curves = list(swept)
-        if "tdd_oracle" not in loader_curves:
-            loader_curves.append("tdd_oracle")
         per_curve = {c: [] for c in loader_curves}
         for sd in seeds:
             loader = build_loader(config, transform, h5_path, mg, snr, sd,

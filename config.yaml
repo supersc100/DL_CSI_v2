@@ -22,10 +22,10 @@ data:
   processed_data_dir: "./data/processed"
   h5_train: "./data/processed/train.h5"
   h5_val: "./data/processed/val.h5"
-  h5_test: "./data/processed/test.h5"
+  h5_test: "./data/processed/test_cdla.h5"
 
   # 3GPP scenario: UMa | UMi | RMa
-  scenario: "UMa"
+  scenario: "A"
   # Carrier frequencies (Hz) for UL and DL
   ul_carrier_freq: 2.0e9   # e.g., 2 GHz uplink
   dl_carrier_freq: 2.1e9   # e.g., 2.1 GHz downlink
@@ -53,7 +53,7 @@ data:
   samples:
     train: 70000
     val: 10000
-    test: 20000
+    test: 20
 
   # Large-scale parameters to extract and share between UL/DL
   large_scale_params:
@@ -308,6 +308,7 @@ simulation:
   # x-axis grids
   snr_list: [-10, -5, 0, 5, 10, 15, 20, 25, 30]   # NMSE/SE vs SNR
   overhead_list: [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]  # pilot overhead
+  quant_bits_list: [16, 8, 4, 2]  # quantization bit-widths for NMSE vs SNR
   fixed_snr: 10.0          # SNR used for overhead sweeps (simPlan 1.2 / 4c)
   seeds: [42, 43, 44]      # noise realizations averaged for error bars
   output_dir: "./outputs/sim"

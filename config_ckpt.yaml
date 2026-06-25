@@ -307,6 +307,7 @@ simulation:
   # x-axis grids
   snr_list: [-10, -5, 0, 5, 10, 15, 20, 25, 30]   # NMSE/SE vs SNR
   overhead_list: [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]  # pilot overhead
+  quant_bits_list: [16, 8, 4, 2]  # quantization bit-widths for NMSE vs SNR
   fixed_snr: 10.0          # SNR used for overhead sweeps (simPlan 1.2 / 4c)
   seeds: [42, 43, 44]      # noise realizations averaged for error bars
   output_dir: "./outputs/sim"

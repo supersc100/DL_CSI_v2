@@ -56,6 +56,32 @@ def _sim_cfg(config, key, default):
     return getattr(sim, key, default)
 
 
+def _resolve_quant_bits(args, config):
+    """Resolve quantization bit-width list from CLI and config.
+
+    Priority:
+      1. --quant-bits explicit list
+      2. --quant-curve flag -> use config default list
+      3. None -> no quantization curves
+    """
+    if args.quant_bits is not None:
+        return args.quant_bits
+    if args.quant_curve:
+        return _sim_cfg(config, "quant_bits_list",
+                        [int(config.phase2.quantization.num_bits)])
+    return None
+
+
+def _quant_curve_name(num_bits):
+    """Return curve name for a given quantization bit-width."""
+    return f"proposed_quant_{num_bits}bit"
+
+
+def _build_quantizers(bit_widths):
+    """Build a dict mapping curve name to ScalarQuantizer."""
+    return {_quant_curve_name(b): ScalarQuantizer(num_bits=b) for b in bit_widths}
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Run paper simulation sweeps.")
     p.add_argument("--config", default="config.yaml")
@@ -81,7 +107,9 @@ def parse_args():
                    help="SNR (dB) for overhead sweeps. Default from config.")
     p.add_argument("--seeds", type=int, nargs="+", default=None)
     p.add_argument("--quant-curve", action="store_true",
-                   help="Also evaluate the model with 16-bit quantized pilots.")
+                   help="使用 simulation.quant_bits_list 启用量化曲线。")
+    p.add_argument("--quant-bits", type=int, nargs="+", default=None,
+                   help="覆盖量化比特宽度，例如 --quant-bits 16 8 4 2。")
     p.add_argument("--output-dir", default=None)
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
@@ -200,14 +228,14 @@ def _update_metrics(agg, metrics, compute_se, pred, target, se_snr):
 
 @torch.no_grad()
 def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
-                    quantizer=None, full_fb_quantizer=None):
+                    quantizers=None, full_fb_quantizer=None):
     """Evaluate multiple Stage2 curves in a **single pass** over ``loader``.
 
     This avoids re-reading the H5 file and re-running the model for every
     baseline, which is the main bottleneck for ``nmse_snr`` and
     ``nmse_overhead``.
 
-    Supported curve names: proposed, proposed_quant, magnitude_only,
+    Supported curve names: proposed, proposed_quant_{N}bit, magnitude_only,
     linear_interp, dft_interp, tdd_oracle, full_feedback.
     """
     model.eval()
@@ -223,8 +251,8 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
         history_ul = b["history_ul_ad"]
         history_dl = b["history_dl_ad"]
 
-        # Proposed model (and optionally its quantized-pilot variant).
-        if "proposed" in curves or "proposed_quant" in curves:
+        # Proposed model (and optionally its quantized-pilot variants).
+        if "proposed" in curves or any(c in curves for c in (quantizers or {})):
             pred, aux = model(
                 h_ul, sparse, mask,
                 large_scale=large_scale,
@@ -235,17 +263,18 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
                     aggs["proposed"],
                     compute_phase2_metrics(pred, target, aux["mag_stage1"]),
                     compute_se, pred, target, se_snr)
-            if "proposed_quant" in curves:
-                sparse_q = quantizer(sparse)
-                pred_q, aux_q = model(
-                    h_ul, sparse_q, mask,
-                    large_scale=large_scale,
-                    history_ul_ad=history_ul, history_dl_ad=history_dl,
-                )
-                _update_metrics(
-                    aggs["proposed_quant"],
-                    compute_phase2_metrics(pred_q, target, aux_q["mag_stage1"]),
-                    compute_se, pred_q, target, se_snr)
+            for q_curve, q_obj in (quantizers or {}).items():
+                if q_curve in curves:
+                    sparse_q = q_obj(sparse)
+                    pred_q, aux_q = model(
+                        h_ul, sparse_q, mask,
+                        large_scale=large_scale,
+                        history_ul_ad=history_ul, history_dl_ad=history_dl,
+                    )
+                    _update_metrics(
+                        aggs[q_curve],
+                        compute_phase2_metrics(pred_q, target, aux_q["mag_stage1"]),
+                        compute_se, pred_q, target, se_snr)
 
         # Stage1-magnitude-only baseline (needs one Stage1 forward).
         if "magnitude_only" in curves:
@@ -348,12 +377,14 @@ def run_nmse_snr(args, config, transform, device, h5_path):
                                  snr_list, seeds)
 
     model = _load_stage2(args, config, device)
-    quant = ScalarQuantizer(num_bits=int(config.phase2.quantization.num_bits))
+    quant_bits = _resolve_quant_bits(args, config)
+    quantizers = _build_quantizers(quant_bits) if quant_bits else None
 
     curves = ["proposed", "magnitude_only", "linear_interp", "tdd_oracle",
               "full_feedback"]
-    if args.quant_curve:
-        curves.insert(1, "proposed_quant")
+    if quant_bits:
+        for q_curve in reversed(list(quantizers.keys())):
+            curves.insert(1, q_curve)
 
     rows = []
     for snr in snr_list:
@@ -363,7 +394,8 @@ def run_nmse_snr(args, config, transform, device, h5_path):
                                   snr, sd, args.num_samples, phase2=True)
             results = eval_all_stage2(
                 model, loader, device, curves, compute_se=False, se_snr=0.0,
-                quantizer=quant, full_fb_quantizer=quant)
+                quantizers=quantizers,
+                full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
             for c in curves:
                 per_curve[c].append(results[c]["nmse_db"])
         rows.extend(_reduce_rows(per_curve, snr, "nmse_db"))
@@ -398,7 +430,8 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
     snr = args.fixed_snr if args.fixed_snr is not None else _sim_cfg(
         config, "fixed_snr", 10.0)
     model = _load_stage2(args, config, device)
-    quant = ScalarQuantizer(num_bits=int(config.phase2.quantization.num_bits))
+    quant_bits = _resolve_quant_bits(args, config)
+    quantizers = _build_quantizers(quant_bits) if quant_bits else None
     M = int(config.data.num_subcarriers)
 
     # Curves that actually consume the sparse pilots and therefore vary with
@@ -407,8 +440,9 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
     # magnitude_only is the 0%-overhead anchor (phase=0, no DL pilots), and
     # full_feedback is the 100%-overhead anchor (full-band CSI fed back).
     swept = ["proposed", "linear_interp"]
-    if args.quant_curve:
-        swept.insert(1, "proposed_quant")
+    if quant_bits:
+        for q_curve in reversed(list(quantizers.keys())):
+            swept.insert(1, q_curve)
 
     rows = []
     for ov in ov_list:
@@ -431,7 +465,8 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
             actual_ov, _ = measure_overhead(loader)
             results = eval_all_stage2(
                 model, loader, device, loader_curves, compute_se=False,
-                quantizer=quant, full_fb_quantizer=quant)
+                quantizers=quantizers,
+                full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
             for c in loader_curves:
                 per_curve[c].append(results[c]["nmse_db"])
         x = round(actual_ov * 100, 2)
@@ -446,7 +481,7 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
                               args.num_samples, phase2=True)
         res = eval_all_stage2(
             model, loader, device, anchor_curves, compute_se=False,
-            full_fb_quantizer=quant)
+            full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
         for c in anchor_curves:
             anchor_results[c].append(res[c]["nmse_db"])
     rows.extend(_reduce_rows({"magnitude_only": anchor_results["magnitude_only"]}, 0.0, "nmse_db"))

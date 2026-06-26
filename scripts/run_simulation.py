@@ -196,7 +196,7 @@ def eval_baseline_stage2(model, loader, device, name, compute_se, se_snr,
                 s1_kwargs["history_dl_ad"] = b["history_dl_ad"]
             kwargs["stage1_pred"] = model.stage1(b["h_ul_ad"], **s1_kwargs)
         elif name in ("linear_interp", "dft_interp"):
-            kwargs["sparse_dl_ad"] = b["sparse_dl_ad"]
+            kwargs["sparse_dl"] = b["sparse_dl"]
             kwargs["mask"] = b["sampling_mask"]
         elif name == "full_feedback":
             kwargs["quantizer"] = full_fb_quantizer
@@ -244,6 +244,7 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
         target = b["h_dl_ad"]
         h_ul = b["h_ul_ad"]
         sparse = b["sparse_dl_ad"]
+        sparse_sf = b["sparse_dl"]
         mask = b["sampling_mask"]
         large_scale = b["large_scale"]
         history_ul = b["history_ul_ad"]
@@ -291,13 +292,13 @@ def eval_all_stage2(model, loader, device, curves, compute_se=False, se_snr=0.0,
 
         # Interpolation baselines.
         if "linear_interp" in curves:
-            pred_li = BASELINES["linear_interp"](sparse, mask, target)["pred_ad"]
+            pred_li = BASELINES["linear_interp"](sparse_sf, mask, target)["pred_ad"]
             _update_metrics(
                 aggs["linear_interp"],
                 compute_phase2_metrics(pred_li, target),
                 compute_se, pred_li, target, se_snr)
         if "dft_interp" in curves:
-            pred_di = BASELINES["dft_interp"](sparse, mask, target)["pred_ad"]
+            pred_di = BASELINES["dft_interp"](sparse_sf, mask, target)["pred_ad"]
             _update_metrics(
                 aggs["dft_interp"],
                 compute_phase2_metrics(pred_di, target),
@@ -490,21 +491,19 @@ def run_sampling_overhead(args, config, transform, device, h5_path):
     model = _load_stage2(args, config, device)
     M = int(config.data.num_subcarriers)
 
-    # Fair ablation (control variables): all curves share the same adaptive base
-    # grid (spacing chosen from the RMS delay spread); they differ ONLY in the
-    # extra peak encryption strategy:
-    #   - no_peak:      no extra encryption (baseline).
-    #   - random_peak:  same budget, random peak locations.
-    #   - energy_peak:  same budget, peak locations from UL energy (proposed).
+    # Sampling-strategy comparison at each target overhead.  All three curves
+    # share the same uniform base grid (spacing determined by the target
+    # overhead); they differ ONLY in the peak encryption strategy:
+    #   - uniform:    uniform base grid only, no peak encryption.
+    #   - nonuniform: uniform base grid + random peak encryption.
+    #   - adaptive:   uniform base grid + energy-guided peak encryption.
     #
-    # We keep the curve names as uniform / nonuniform / adaptive for the paper
-    # legend, but here "uniform" means "adaptive base with no peaks",
-    # "nonuniform" means "adaptive base with random peaks", and "adaptive"
-    # means "adaptive base with energy peaks".
+    # use_adaptive=False ensures base_spacing is honored, so the x-axis is a
+    # true pilot-overhead sweep.
     strategy_configs = [
-        ("uniform",    {"use_adaptive": True, "use_peaks": False, "peak_mode": "energy"}),
-        ("nonuniform", {"use_adaptive": True, "use_peaks": True,  "peak_mode": "random"}),
-        ("adaptive",   {"use_adaptive": True, "use_peaks": True,  "peak_mode": "energy"}),
+        ("uniform",    {"use_adaptive": False, "use_peaks": False, "peak_mode": "energy"}),
+        ("nonuniform", {"use_adaptive": False, "use_peaks": True,  "peak_mode": "random"}),
+        ("adaptive",   {"use_adaptive": False, "use_peaks": True,  "peak_mode": "energy"}),
     ]
     rows = []
     for ov in ov_list:

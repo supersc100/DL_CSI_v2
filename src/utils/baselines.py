@@ -7,6 +7,7 @@ import numpy as np
 
 from src.data.transforms import (
     angle_delay_to_spatial,
+    normalize_csi,
     real_channels_to_complex,
     spatial_to_angle_delay,
 )
@@ -78,6 +79,59 @@ def baseline_no_history(
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_uniform_subset(mask: torch.Tensor) -> torch.Tensor:
+    """Extract the largest complete uniform comb subset from a boolean mask.
+
+    A complete comb with spacing ``d`` and offset ``offset`` means every index
+    ``offset + k*d`` (for k = 0, 1, ...) is present in ``mask``.  This is the
+    natural grid for decimated-IFFT DFT interpolation.
+
+    Args:
+        mask: bool tensor of shape [M] or [B, M].
+
+    Returns:
+        bool tensor of the same shape, True only on the selected uniform
+        comb positions that are also True in the input mask.
+    """
+    if mask.dim() == 1:
+        mask = mask.unsqueeze(0)
+    B, M = mask.shape
+    device = mask.device
+    result = torch.zeros_like(mask)
+
+    for b in range(B):
+        best_count = 0
+        best_d = 1
+        best_offset = 0
+
+        # Search over all candidate spacings and offsets.
+        for d in range(1, M):
+            for offset in range(d):
+                positions = torch.arange(offset, M, d, device=device)
+                if positions.numel() == 0:
+                    continue
+                valid = mask[b, positions]
+                # Only consider complete combs (every position present).
+                if not valid.all():
+                    continue
+                count = positions.numel()
+                if count > best_count:
+                    best_count = count
+                    best_d = d
+                    best_offset = offset
+
+        if best_count > 0:
+            positions = torch.arange(best_offset, M, best_d, device=device)
+            result[b, positions] = True
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 baselines
 # ---------------------------------------------------------------------------
 
@@ -91,34 +145,55 @@ def baseline_magnitude_only(
 
 
 def baseline_linear_interp(
-    sparse_dl_ad: torch.Tensor,
+    sparse_dl: torch.Tensor,
     mask: torch.Tensor,
     target_dl_ad: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
-    """Phase2 baseline 2: linear interpolation along subcarrier dimension."""
-    pred = torch.zeros_like(sparse_dl_ad)
-    B, N_tx, N_rx, M = sparse_dl_ad.shape
+    """Phase2 baseline 2: linear interpolation in the spatial-frequency domain.
+
+    The sampling mask is defined in the spatial-frequency domain, so the
+    interpolation is performed along subcarriers on ``sparse_dl``.  The
+    reconstructed full-band spatial-frequency response is then transformed back
+    to the normalized angle-delay domain for fair comparison with
+    ``target_dl_ad``.
+    """
+    B, N_tx, N_rx, M = sparse_dl.shape
+    device = sparse_dl.device
+    dtype = sparse_dl.dtype
+
+    # Collate mask to [B, M].
+    if mask.dim() == 1:
+        mask = mask.unsqueeze(0).expand(B, -1)
+
+    pred_sf = torch.zeros_like(sparse_dl)
+
     for b in range(B):
-        sampled_indices = mask[b].nonzero(as_tuple=True)[0].cpu().numpy()
+        mask_b = mask[b]
+        sampled_indices = mask_b.nonzero(as_tuple=True)[0].cpu().numpy()
         if len(sampled_indices) < 2:
-            pred[b] = sparse_dl_ad[b]
+            pred_sf[b] = sparse_dl[b]
             continue
         sampled_indices = sampled_indices.astype(float)
         for tx in range(N_tx):
             for rx in range(N_rx):
-                vals = sparse_dl_ad[b, tx, rx, mask[b]].cpu().numpy()
-                # Linear interpolation for real and imaginary separately.
+                vals = sparse_dl[b, tx, rx, mask_b].cpu().numpy()
                 pred_real = np.interp(
-                    np.arange(M), sampled_indices, vals.real, left=vals.real[0], right=vals.real[-1]
+                    np.arange(M), sampled_indices, vals.real,
+                    left=vals.real[0], right=vals.real[-1]
                 )
                 pred_imag = np.interp(
-                    np.arange(M), sampled_indices, vals.imag, left=vals.imag[0], right=vals.imag[-1]
+                    np.arange(M), sampled_indices, vals.imag,
+                    left=vals.imag[0], right=vals.imag[-1]
                 )
-                pred[b, tx, rx] = torch.complex(
+                pred_sf[b, tx, rx] = torch.complex(
                     torch.from_numpy(pred_real),
                     torch.from_numpy(pred_imag),
-                ).to(sparse_dl_ad.device)
-    return {"pred_ad": pred, "target_ad": target_dl_ad}
+                ).to(device, dtype)
+
+    # Convert back to angle-delay domain and normalize to match target scale.
+    pred_ad = spatial_to_angle_delay(pred_sf)
+    pred_ad_norm, _ = normalize_csi(pred_ad)
+    return {"pred_ad": pred_ad_norm, "target_ad": target_dl_ad}
 
 
 def baseline_full_feedback(
@@ -138,72 +213,74 @@ def baseline_full_feedback(
 
 
 def baseline_dft_interp(
-    sparse_dl_ad: torch.Tensor,
+    sparse_dl: torch.Tensor,
     mask: torch.Tensor,
     target_dl_ad: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
-    """Phase2 baseline 3: mask-aware DFT interpolation for sparse OFDM pilots.
+    """Phase2 baseline 3: DFT interpolation in the spatial-frequency domain.
 
-    The sampling mask is defined in the spatial-frequency domain, so the input
-    (which is in the angle-delay domain) is first transformed back to the
-    angle-frequency domain via FFT along subcarriers. A delay-domain least-squares
-    problem is solved from the observed pilot indices, the full frequency response
-    is reconstructed, and the result is transformed back to angle-delay domain.
-    Works for both uniform and non-uniform sampling masks.
+    The mask is defined in the spatial-frequency domain.  A complete uniform
+    comb subset is extracted from the mask.  The classical OFDM-style DFT
+    interpolation is then applied per antenna pair:
+
+        1. Extract the K observed samples on the uniform comb.
+        2. K-point IFFT to obtain K delay-domain taps.
+        3. Compensate the linear phase induced by a non-zero comb offset.
+        4. Zero-pad the taps to M and M-point FFT back to the full frequency
+           response.
+
+    The reconstructed full-band spatial-frequency response is finally
+    transformed back to the normalized angle-delay domain.
     """
-    B, N_tx, N_rx, M = sparse_dl_ad.shape
-    device = sparse_dl_ad.device
-    dtype = sparse_dl_ad.dtype
+    B, N_tx, N_rx, M = sparse_dl.shape
+    device = sparse_dl.device
+    dtype = sparse_dl.dtype
 
-    # Transform to angle-frequency domain, where the mask has meaning.
-    sparse_af = torch.fft.fft(sparse_dl_ad, n=M, dim=-1, norm="ortho")
-    pred_af = torch.zeros_like(sparse_af)
-
-    # Collate yields [B, M]; support [M] shared mask for backward compatibility.
+    # Collate mask to [B, M]; support [M] shared mask for backward compatibility.
     if mask.dim() == 1:
         mask = mask.unsqueeze(0).expand(B, -1)
 
-    N_spatial = N_tx * N_rx
+    # Extract the largest complete uniform comb from the mask.
+    uniform_mask = _extract_uniform_subset(mask)
+
+    pred_sf = torch.zeros_like(sparse_dl)
+
     for b in range(B):
-        mask_b = mask[b]
-        sampled_indices = mask_b.nonzero(as_tuple=True)[0].to(torch.float32)
-        K = sampled_indices.numel()
+        uni_b = uniform_mask[b]
+        uni_idx = uni_b.nonzero(as_tuple=True)[0]
+        K = uni_idx.numel()
         if K == 0:
             continue
 
-        # Effective delay taps: cap at M//2 (delay-sparse prior).
-        L = min(K, M // 2)
-        if L < 1:
-            L = 1
+        offset = int(uni_idx[0].item())
+        d = int((uni_idx[1] - uni_idx[0]).item()) if K > 1 else 1
 
-        # Partial DFT matrix A[k, l] = (1/sqrt(M)) * exp(-j * 2π * m_k * l / M)
-        # to match torch.fft.fft with norm="ortho".
-        l_range = torch.arange(L, device=device, dtype=torch.float32)
-        phase = -2.0 * torch.pi * torch.outer(sampled_indices, l_range) / M
-        A = torch.exp(1j * phase).to(dtype) / (M ** 0.5)  # [K, L]
+        # Comb samples: [N_tx, N_rx, K].
+        h_comb = sparse_dl[b, :, :, uni_b]
 
-        # Sampled values for all TX/RX (angle-frequency): [N_spatial, K]
-        y = sparse_af[b].reshape(N_spatial, M)[:, mask_b]
+        # K-point IFFT gives delay-domain taps of the phase-shifted sequence.
+        h_time = torch.fft.ifft(h_comb, n=K, dim=-1, norm="ortho")
 
-        # Tikhonov-regularized least squares for numerical stability under noise.
-        # h = (A^H A + λ I)^{-1} A^H y.  We compute B = (A^H A + λI)^{-1} A^H
-        # (shape [L, K]) and then h = y @ B.T.
-        A_H = A.conj().T  # [L, K]
-        AHA = A_H @ A  # [L, L]
-        reg = 1e-4 * torch.eye(L, device=device, dtype=dtype)
-        B = torch.linalg.solve(AHA + reg, A_H)  # [L, K]
-        h_ls = y @ B.T.to(dtype)  # [N_spatial, L]
+        # Undo the linear phase induced by the comb offset.
+        if offset != 0:
+            n_grid = torch.arange(K, device=device, dtype=torch.float32)
+            phase = torch.exp(1j * 2.0 * torch.pi * offset * n_grid / M).to(dtype)
+            h_time = h_time * phase.view(1, 1, K)
 
-        # Zero-pad to M delay taps, FFT back to angle-frequency domain.
-        h_full = torch.zeros(N_spatial, M, dtype=dtype, device=device)
-        h_full[:, :L] = h_ls
-        pred_af[b] = torch.fft.fft(h_full, n=M, dim=-1, norm="ortho").reshape(
-            N_tx, N_rx, M
-        )
+        # Scale correction: orthonormal K-point IFFT + M-point FFT introduces
+        # a factor of 1/sqrt(d). Compensate so that full sampling (d=1) is exact.
+        if d > 1:
+            h_time = h_time * (d ** 0.5)
 
-    # Transform back to angle-delay domain.
-    pred_ad = torch.fft.ifft(pred_af, n=M, dim=-1, norm="ortho")
-    return {"pred_ad": pred_ad, "target_ad": target_dl_ad}
+        # Zero-pad to M taps and FFT back to full frequency response.
+        h_padded = torch.zeros(N_tx, N_rx, M, dtype=dtype, device=device)
+        h_padded[:, :, :K] = h_time
+        pred_sf[b] = torch.fft.fft(h_padded, n=M, dim=-1, norm="ortho")
+
+    # Convert back to angle-delay domain and normalize to match target scale.
+    pred_ad = spatial_to_angle_delay(pred_sf)
+    pred_ad_norm, _ = normalize_csi(pred_ad)
+    return {"pred_ad": pred_ad_norm, "target_ad": target_dl_ad}
 
 
 BASELINES = {

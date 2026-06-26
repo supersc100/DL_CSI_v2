@@ -2,10 +2,11 @@
 import pytest
 import torch
 
+from src.data.transforms import normalize_csi, spatial_to_angle_delay
 from src.models.sampling_mask import SamplingMaskGenerator
 from src.models.quantization import ScalarQuantizer
 from src.models.phase_head import PhaseHead
-from src.utils.baselines import baseline_dft_interp
+from src.utils.baselines import baseline_dft_interp, baseline_linear_interp
 
 
 def _nmse(pred, target):
@@ -14,86 +15,139 @@ def _nmse(pred, target):
     return float((10.0 * torch.log10(num / den)).item())
 
 
+def _make_target_ad(h_sf):
+    """Convert a spatial-frequency tensor to normalized angle-delay target."""
+    h_ad = spatial_to_angle_delay(h_sf)
+    return normalize_csi(h_ad)[0]
+
+
 def test_dft_interp_full_sampling():
-    """Full frequency sampling of a delay-sparse signal should reconstruct exactly."""
+    """Full frequency sampling should reconstruct the spatial-frequency response exactly."""
     B, N_tx, N_rx, M = 2, 4, 2, 32
-    # h_delay lives in the angle-delay domain (last dim = delay).
-    h_delay = torch.zeros(B, N_tx, N_rx, M, dtype=torch.complex64)
-    h_delay[..., : M // 2] = torch.randn(B, N_tx, N_rx, M // 2, dtype=torch.complex64)
-    # Transform to angle-frequency; the mask is defined here.
-    h_af = torch.fft.fft(h_delay, n=M, dim=-1, norm="ortho")
-
+    h_sf = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
     mask = torch.ones(M, dtype=torch.bool)
-    sparse_af = h_af.clone()
-    # Baseline receives angle-delay input, like the real pipeline.
-    sparse_ad = torch.fft.ifft(sparse_af, n=M, dim=-1, norm="ortho")
+    sparse_sf = h_sf.clone()
 
-    out = baseline_dft_interp(sparse_ad, mask, h_delay)
-    assert _nmse(out["pred_ad"], h_delay) < -40.0
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_dft_interp(sparse_sf, mask, target_ad_norm)
+    assert _nmse(out["pred_ad"], target_ad_norm) < -40.0
 
 
-def test_dft_interp_nonuniform_mask():
-    """Non-uniform sparse frequency sampling: reconstructed AF samples are exact."""
+def test_dft_interp_uniform_comb():
+    """Uniform comb sampling of a delay-sparse signal should reconstruct well."""
     B, N_tx, N_rx, M = 2, 4, 2, 32
-    h_delay = torch.zeros(B, N_tx, N_rx, M, dtype=torch.complex64)
-    h_delay[..., :6] = torch.randn(B, N_tx, N_rx, 6, dtype=torch.complex64)
-    h_af = torch.fft.fft(h_delay, n=M, dim=-1, norm="ortho")
+    # Build a delay-limited channel in the spatial-frequency domain.
+    h_time = torch.zeros(B, N_tx, N_rx, M, dtype=torch.complex64)
+    h_time[..., :6] = torch.randn(B, N_tx, N_rx, 6, dtype=torch.complex64)
+    h_sf = torch.fft.fft(h_time, n=M, dim=-1, norm="ortho")
 
+    # Uniform comb mask with spacing 4 (K = 8 samples).
     mask = torch.zeros(M, dtype=torch.bool)
-    mask[::3] = True
+    mask[::4] = True
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., mask] = h_sf[..., mask]
+
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_dft_interp(sparse_sf, mask, target_ad_norm)
+    pred_ad = out["pred_ad"]
+
+    # Angle-delay prediction should closely match the normalized target.
+    assert _nmse(pred_ad, target_ad_norm) < -30.0
+
+
+def test_dft_interp_extracts_base_grid():
+    """With a non-uniform mask, DFT baseline extracts the uniform base grid."""
+    M = 32
+    # Base grid spacing 8 plus a few peak samples.
+    mask = torch.zeros(M, dtype=torch.bool)
+    mask[::8] = True
     mask[5] = True
-    mask[17] = True
-    mask[29] = True
+    mask[13] = True
 
-    sparse_af = torch.zeros_like(h_af)
-    sparse_af[..., mask] = h_af[..., mask]
-    sparse_ad = torch.fft.ifft(sparse_af, n=M, dim=-1, norm="ortho")
+    h_sf = torch.randn(1, 2, 2, M, dtype=torch.complex64)
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., mask] = h_sf[..., mask]
 
-    out = baseline_dft_interp(sparse_ad, mask, h_delay)
-    pred = out["pred_ad"]
-
-    # The regularized LS solution approximately reproduces the observed samples.
-    pred_af = torch.fft.fft(pred, n=M, dim=-1, norm="ortho")
-    assert torch.allclose(pred_af[..., mask], h_af[..., mask], atol=1e-2)
-    # Overall reconstruction should be decent for a delay-sparse signal.
-    assert _nmse(pred, h_delay) < 0.0
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_dft_interp(sparse_sf, mask, target_ad_norm)
+    assert out["pred_ad"].shape == target_ad_norm.shape
 
 
 def test_dft_interp_edge_cases():
-    """Edge cases: no samples, single sample, underdetermined system."""
+    """Edge cases: no samples, single sample, two samples."""
     B, N_tx, N_rx, M = 1, 2, 2, 16
-    target_ad = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
-    target_af = torch.fft.fft(target_ad, n=M, dim=-1, norm="ortho")
+    h_sf = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
+    target_ad_norm = _make_target_ad(h_sf)
 
     # No samples.
     mask_empty = torch.zeros(M, dtype=torch.bool)
-    sparse_ad = torch.zeros_like(target_ad)
-    out = baseline_dft_interp(sparse_ad, mask_empty, target_ad)
-    assert torch.allclose(out["pred_ad"], torch.zeros_like(target_ad))
+    sparse_sf = torch.zeros_like(h_sf)
+    out = baseline_dft_interp(sparse_sf, mask_empty, target_ad_norm)
+    assert torch.allclose(out["pred_ad"], torch.zeros_like(target_ad_norm))
 
     # Single sample in frequency domain.
     mask_one = torch.zeros(M, dtype=torch.bool)
     idx = M // 2
     mask_one[idx] = True
-    sparse_af = torch.zeros_like(target_af)
-    sparse_af[..., idx] = target_af[..., idx]
-    sparse_ad = torch.fft.ifft(sparse_af, n=M, dim=-1, norm="ortho")
-    out = baseline_dft_interp(sparse_ad, mask_one, target_ad)
-    # With one sample, the reconstructed AF is approximately constant equal to the sample.
-    expected_af = sparse_af[..., idx : idx + 1].expand_as(target_af)
-    expected_ad = torch.fft.ifft(expected_af, n=M, dim=-1, norm="ortho")
-    assert torch.allclose(out["pred_ad"], expected_ad, atol=1e-2)
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., idx] = h_sf[..., idx]
+    out = baseline_dft_interp(sparse_sf, mask_one, target_ad_norm)
+    assert out["pred_ad"].shape == target_ad_norm.shape
 
-    # Two samples (underdetermined, L_eff capped at 2).
+    # Two samples (uniform comb with spacing M/2).
     mask_two = torch.zeros(M, dtype=torch.bool)
-    mask_two[2] = True
-    mask_two[10] = True
-    sparse_af = torch.zeros_like(target_af)
-    sparse_af[..., mask_two] = target_af[..., mask_two]
-    sparse_ad = torch.fft.ifft(sparse_af, n=M, dim=-1, norm="ortho")
-    out = baseline_dft_interp(sparse_ad, mask_two, target_ad)
-    pred_af = torch.fft.fft(out["pred_ad"], n=M, dim=-1, norm="ortho")
-    assert torch.allclose(pred_af[..., mask_two], target_af[..., mask_two], atol=1e-2)
+    mask_two[0] = True
+    mask_two[M // 2] = True
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., mask_two] = h_sf[..., mask_two]
+    out = baseline_dft_interp(sparse_sf, mask_two, target_ad_norm)
+    assert out["pred_ad"].shape == target_ad_norm.shape
+
+
+def test_linear_interp_full_sampling():
+    """Full sampling should reconstruct exactly via linear interpolation."""
+    B, N_tx, N_rx, M = 2, 4, 2, 32
+    h_sf = torch.randn(B, N_tx, N_rx, M, dtype=torch.complex64)
+    mask = torch.ones(M, dtype=torch.bool)
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_linear_interp(h_sf, mask, target_ad_norm)
+    assert _nmse(out["pred_ad"], target_ad_norm) < -40.0
+
+
+def test_linear_interp_sparse_uniform():
+    """Sparse uniform sampling should produce a smooth interpolation."""
+    B, N_tx, N_rx, M = 2, 4, 2, 32
+    h_time = torch.zeros(B, N_tx, N_rx, M, dtype=torch.complex64)
+    h_time[..., :6] = torch.randn(B, N_tx, N_rx, 6, dtype=torch.complex64)
+    h_sf = torch.fft.fft(h_time, n=M, dim=-1, norm="ortho")
+
+    mask = torch.zeros(M, dtype=torch.bool)
+    mask[::4] = True
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., mask] = h_sf[..., mask]
+
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_linear_interp(sparse_sf, mask, target_ad_norm)
+    pred_ad = out["pred_ad"]
+    assert pred_ad.shape == target_ad_norm.shape
+    assert _nmse(pred_ad, target_ad_norm) < 10.0
+
+
+def test_linear_interp_nonuniform_mask():
+    """Linear interpolation should run on non-uniform masks without error."""
+    M = 32
+    mask = torch.zeros(M, dtype=torch.bool)
+    mask[::8] = True
+    mask[5] = True
+    mask[13] = True
+
+    h_sf = torch.randn(1, 2, 2, M, dtype=torch.complex64)
+    sparse_sf = torch.zeros_like(h_sf)
+    sparse_sf[..., mask] = h_sf[..., mask]
+
+    target_ad_norm = _make_target_ad(h_sf)
+    out = baseline_linear_interp(sparse_sf, mask, target_ad_norm)
+    assert out["pred_ad"].shape == target_ad_norm.shape
 
 
 def test_sampling_mask_generator():

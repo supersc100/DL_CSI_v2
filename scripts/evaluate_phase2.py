@@ -117,7 +117,7 @@ def evaluate_baselines(model, dataloader, device, baselines):
                     stage1_pred = model.stage1(h_ul_ad, **stage1_kwargs)
                 kwargs["stage1_pred"] = stage1_pred
             elif name in ("linear_interp", "dft_interp"):
-                kwargs["sparse_dl_ad"] = batch["sparse_dl_ad"].to(device)
+                kwargs["sparse_dl"] = batch["sparse_dl"].to(device)
                 kwargs["mask"] = batch["sampling_mask"].to(device)
             else:
                 # Skip unsupported baselines for Phase2 eval.

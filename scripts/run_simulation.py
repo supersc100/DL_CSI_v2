@@ -143,7 +143,7 @@ def build_loader(config, transform, h5_path, mask_generator, snr_db,
 
 def _to_device(batch, device):
     out = {}
-    for k in ("h_ul_ad", "sparse_dl_ad", "sampling_mask", "h_dl_ad",
+    for k in ("h_ul_ad", "sparse_dl_ad", "sparse_dl", "sampling_mask", "h_dl_ad",
               "large_scale", "history_ul_ad", "history_dl_ad"):
         v = batch.get(k)
         out[k] = v.to(device) if v is not None else None

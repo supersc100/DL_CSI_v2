@@ -49,9 +49,11 @@ class Trainer:
         )
         self.nmse_loss = NmseLoss()
 
-        # Training-time UL noise augmentation.
+        # Training-time UL corruption augmentation.
         self.ul_noise_prob = float(getattr(config.training, "ul_noise_prob", 0.0))
         self.ul_noise_snr_list = list(getattr(config.training, "ul_noise_snr_list", []))
+        self.ul_mask_prob = float(getattr(config.training, "ul_mask_prob", 0.0))
+        self.ul_mask_ratio = float(getattr(config.training, "ul_mask_ratio", 0.0))
 
         # AMP / scaler.
         self.use_amp = bool(config.project.mixed_precision) and self.device.type == "cuda"
@@ -99,13 +101,20 @@ class Trainer:
                 current_ul_ad = batch["h_ul_ad"].to(self.device)
                 target_dl_ad = batch["h_dl_ad"].to(self.device)
 
-                # Training-time UL noise augmentation: randomly corrupt the
+                # Training-time UL corruption augmentation: randomly corrupt the
                 # uplink input so the network cannot ignore it and memorize a
                 # fixed downlink spectrum.
-                if is_training and self.ul_noise_prob > 0.0 and len(self.ul_noise_snr_list) > 0:
-                    if random.random() < self.ul_noise_prob:
-                        snr_db = float(random.choice(self.ul_noise_snr_list))
-                        current_ul_ad = add_awgn(current_ul_ad, snr_db)
+                if is_training:
+                    if self.ul_noise_prob > 0.0 and len(self.ul_noise_snr_list) > 0:
+                        if random.random() < self.ul_noise_prob:
+                            snr_db = float(random.choice(self.ul_noise_snr_list))
+                            current_ul_ad = add_awgn(current_ul_ad, snr_db)
+
+                    if self.ul_mask_prob > 0.0 and self.ul_mask_ratio > 0.0:
+                        if random.random() < self.ul_mask_prob:
+                            # Randomly zero out a fraction of spatial-frequency elements.
+                            mask = torch.rand_like(current_ul_ad.real) > self.ul_mask_ratio
+                            current_ul_ad = current_ul_ad * mask
 
                 if self.use_history:
                     history_ul_ad = batch["history_ul_ad"].to(self.device)

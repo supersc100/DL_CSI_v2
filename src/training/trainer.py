@@ -1,5 +1,6 @@
 """Single-stage trainer for the CNN+Transformer FDD CSI predictor."""
 import os
+import random
 from typing import Any, Dict, Optional
 
 import torch
@@ -10,6 +11,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
 from src.training.losses import CsiLoss, NmseLoss
+from src.utils.channel_noise import add_awgn
 from src.utils.logging import Logger
 from src.utils.metrics import compute_all_metrics
 
@@ -43,8 +45,13 @@ class Trainer:
             mse_weight=float(config.training.loss.mse_weight),
             magnitude_weight=float(config.training.loss.get("magnitude_weight", 1.0)),
             angle_delay_l1_weight=float(config.training.loss.angle_delay_l1_weight),
+            diversity_weight=float(config.training.loss.get("diversity_weight", 0.0)),
         )
         self.nmse_loss = NmseLoss()
+
+        # Training-time UL noise augmentation.
+        self.ul_noise_prob = float(getattr(config.training, "ul_noise_prob", 0.0))
+        self.ul_noise_snr_list = list(getattr(config.training, "ul_noise_snr_list", []))
 
         # AMP / scaler.
         self.use_amp = bool(config.project.mixed_precision) and self.device.type == "cuda"
@@ -91,6 +98,14 @@ class Trainer:
             for batch in pbar:
                 current_ul_ad = batch["h_ul_ad"].to(self.device)
                 target_dl_ad = batch["h_dl_ad"].to(self.device)
+
+                # Training-time UL noise augmentation: randomly corrupt the
+                # uplink input so the network cannot ignore it and memorize a
+                # fixed downlink spectrum.
+                if is_training and self.ul_noise_prob > 0.0 and len(self.ul_noise_snr_list) > 0:
+                    if random.random() < self.ul_noise_prob:
+                        snr_db = float(random.choice(self.ul_noise_snr_list))
+                        current_ul_ad = add_awgn(current_ul_ad, snr_db)
 
                 if self.use_history:
                     history_ul_ad = batch["history_ul_ad"].to(self.device)

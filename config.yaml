@@ -168,9 +168,16 @@ training:
   scheduler: "cosine"
 
   loss:
-    mse_weight: 0.0          # complex MSE; keep 0 for pure magnitude training
+    mse_weight: 0.2          # complex MSE; non-zero to prevent fixed-output collapse
     magnitude_weight: 1.0    # magnitude MSE: main objective for FDD independent fast fading
     angle_delay_l1_weight: 0.1
+    diversity_weight: 0.01   # penalize batch-wise collapse to a fixed magnitude template
+
+  # Training-time uplink noise augmentation.  Randomly corrupts the UL input
+  # so the network must learn to extract useful information instead of
+  # memorizing an average downlink spectrum.
+  ul_noise_prob: 0.5
+  ul_noise_snr_list: [-10, -5, 0, 5, 10, 15, 20]
 
   early_stopping:
     patience: 10

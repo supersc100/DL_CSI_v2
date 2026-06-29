@@ -22,11 +22,13 @@ class CsiLoss(nn.Module):
         mse_weight: float = 0.0,
         magnitude_weight: float = 1.0,
         angle_delay_l1_weight: float = 0.1,
+        diversity_weight: float = 0.0,
     ):
         super().__init__()
         self.mse_weight = mse_weight
         self.magnitude_weight = magnitude_weight
         self.angle_delay_l1_weight = angle_delay_l1_weight
+        self.diversity_weight = diversity_weight
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # Pred/target are complex64 from the regression head / dataset.
@@ -46,6 +48,16 @@ class CsiLoss(nn.Module):
             + self.magnitude_weight * magnitude_mse
             + self.angle_delay_l1_weight * ad_l1
         )
+
+        # Diversity regularization: penalize batch-wise collapse to a fixed
+        # magnitude template. Encourages the network to use input-specific
+        # information instead of memorizing the average spectrum.
+        if self.diversity_weight > 0.0 and pred.shape[0] > 1:
+            pred_mag = pred.abs().view(pred.shape[0], -1)
+            # Variance across the batch for each output dimension.
+            diversity = pred_mag.var(dim=0).mean()
+            loss = loss - self.diversity_weight * diversity
+
         return loss
 
 

@@ -112,6 +112,13 @@ def parse_args():
                    help="覆盖量化比特宽度，例如 --quant-bits 16 8 4 2。")
     p.add_argument("--output-dir", default=None)
     p.add_argument("--no-plot", action="store_true")
+    p.add_argument("--curves", type=str, nargs="+", default=None,
+                   help="只跑指定的曲线名称，例如 --curves dft_interp。默认跑全部。")
+    p.add_argument("--dft-uniform", action="store_true",
+                   help="为 dft_interp 基线使用独立的均匀 mask generator（不共用主 mask）。")
+    p.add_argument("--dft-base-spacing", type=int, default=None,
+                   help="nmse_snr 中 dft 均匀 mask 的 base spacing。"
+                        "默认使用 config.phase2.sampling.base_spacing。")
     return p.parse_args()
 
 
@@ -188,6 +195,8 @@ def eval_baseline_stage2(model, loader, device, name, compute_se, se_snr,
         target = b["h_dl_ad"]
         kwargs = {"target_dl_ad": target}
         if name == "magnitude_only":
+            if model is None:
+                continue
             s1_kwargs = {}
             if model.stage1.use_large_scale:
                 s1_kwargs["large_scale"] = b["large_scale"]
@@ -369,7 +378,6 @@ def run_nmse_snr(args, config, transform, device, h5_path):
         return _sweep_stage1_snr(args, config, transform, device, h5_path,
                                  snr_list, seeds)
 
-    model = _load_stage2(args, config, device)
     quant_bits = _resolve_quant_bits(args, config)
     quantizers = _build_quantizers(quant_bits) if quant_bits else None
 
@@ -378,19 +386,36 @@ def run_nmse_snr(args, config, transform, device, h5_path):
     if quant_bits:
         for q_curve in reversed(list(quantizers.keys())):
             curves.insert(1, q_curve)
+    if args.curves is not None:
+        curves = args.curves
+    main_curves = [c for c in curves if not (c == "dft_interp" and args.dft_uniform)]
+
+    # DFT-only runs do not need the trained model.
+    need_model = bool(main_curves) or any(c.startswith("proposed") for c in curves)
+    model = _load_stage2(args, config, device) if need_model else None
 
     rows = []
     for snr in snr_list:
         per_curve = {c: [] for c in curves}
         for sd in seeds:
-            loader = build_loader(config, transform, h5_path, _eval_mask(config),
-                                  snr, sd, args.num_samples, phase2=True)
-            results = eval_all_stage2(
-                model, loader, device, curves, compute_se=False, se_snr=0.0,
-                quantizers=quantizers,
-                full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
-            for c in curves:
-                per_curve[c].append(results[c]["nmse_db"])
+            if main_curves:
+                loader = build_loader(config, transform, h5_path, _eval_mask(config),
+                                      snr, sd, args.num_samples, phase2=True)
+                results = eval_all_stage2(
+                    model, loader, device, main_curves, compute_se=False, se_snr=0.0,
+                    quantizers=quantizers,
+                    full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
+                for c in main_curves:
+                    per_curve[c].append(results[c]["nmse_db"])
+            if "dft_interp" in curves and args.dft_uniform:
+                dft_mg = _dft_uniform_mask_generator(
+                    config, base_spacing=args.dft_base_spacing)
+                dft_loader = build_loader(config, transform, h5_path, dft_mg,
+                                          snr, sd, args.num_samples, phase2=True)
+                res = eval_baseline_stage2(
+                    model, dft_loader, device, "dft_interp",
+                    compute_se=False, se_snr=0.0)
+                per_curve["dft_interp"].append(res["nmse_db"])
         rows.extend(_reduce_rows(per_curve, snr, "nmse_db"))
         print(f"[nmse_snr] SNR={snr:>4} dB done")
     return rows, "SNR (dB)", "NMSE (dB)"
@@ -422,7 +447,6 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
     seeds = args.seeds or _sim_cfg(config, "seeds", [42])
     snr = args.fixed_snr if args.fixed_snr is not None else _sim_cfg(
         config, "fixed_snr", 10.0)
-    model = _load_stage2(args, config, device)
     quant_bits = _resolve_quant_bits(args, config)
     quantizers = _build_quantizers(quant_bits) if quant_bits else None
     M = int(config.data.num_subcarriers)
@@ -432,10 +456,22 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
     # full_feedback / magnitude_only do NOT use pilots, so they are not swept:
     # magnitude_only is the 0%-overhead anchor (phase=0, no DL pilots), and
     # full_feedback is the 100%-overhead anchor (full-band CSI fed back).
-    swept = ["proposed", "linear_interp", "dft_interp"]
+    default_swept = ["proposed", "linear_interp", "dft_interp"]
     if quant_bits:
         for q_curve in reversed(list(quantizers.keys())):
-            swept.insert(1, q_curve)
+            default_swept.insert(1, q_curve)
+    requested = args.curves if args.curves is not None else default_swept
+    swept = [c for c in requested if c not in ("magnitude_only", "full_feedback")]
+    main_swept = [c for c in swept if not (c == "dft_interp" and args.dft_uniform)]
+    run_dft_uniform = "dft_interp" in swept and args.dft_uniform
+    run_anchors = (
+        args.curves is None
+        or any(c in ("magnitude_only", "full_feedback") for c in args.curves)
+    )
+
+    # DFT-only runs do not need the trained model.
+    need_model = bool(main_swept) or run_anchors or any(c.startswith("proposed") for c in requested)
+    model = _load_stage2(args, config, device) if need_model else None
 
     rows = []
     for ov in ov_list:
@@ -447,37 +483,51 @@ def run_nmse_overhead(args, config, transform, device, h5_path):
         # nominal-overhead axis, reaches lower overheads). Selected via
         # --overhead-strategy.
         mg = make_mask_generator(args.overhead_strategy, M, target_overhead=ov)
-        # Evaluate all overhead-dependent curves in one pass per seed.
-        loader_curves = list(swept)
-        per_curve = {c: [] for c in loader_curves}
+        per_curve = {c: [] for c in swept}
+        actual_ov = None
         for sd in seeds:
-            loader = build_loader(config, transform, h5_path, mg, snr, sd,
-                                  args.num_samples, phase2=True)
-            actual_ov, _ = measure_overhead(loader)
-            results = eval_all_stage2(
-                model, loader, device, loader_curves, compute_se=False,
-                quantizers=quantizers,
-                full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
-            for c in loader_curves:
-                per_curve[c].append(results[c]["nmse_db"])
+            if main_swept:
+                loader = build_loader(config, transform, h5_path, mg, snr, sd,
+                                      args.num_samples, phase2=True)
+                actual_ov, _ = measure_overhead(loader)
+                results = eval_all_stage2(
+                    model, loader, device, main_swept, compute_se=False,
+                    quantizers=quantizers,
+                    full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
+                for c in main_swept:
+                    per_curve[c].append(results[c]["nmse_db"])
+            if run_dft_uniform:
+                dft_mg = _dft_uniform_mask_generator(config, target_overhead=ov)
+                dft_loader = build_loader(config, transform, h5_path, dft_mg,
+                                          snr, sd, args.num_samples, phase2=True)
+                if actual_ov is None:
+                    actual_ov, _ = measure_overhead(dft_loader)
+                res = eval_baseline_stage2(
+                    model, dft_loader, device, "dft_interp",
+                    compute_se=False, se_snr=0.0)
+                per_curve["dft_interp"].append(res["nmse_db"])
         x = round(actual_ov * 100, 2)
         rows.extend(_reduce_rows(per_curve, x, "nmse_db"))
         print(f"[nmse_overhead] overhead~{actual_ov*100:.1f}% done")
 
     # Anchor points (pilot-independent): magnitude_only @ 0%, full_feedback @ 100%.
-    anchor_curves = ["magnitude_only", "full_feedback"]
-    anchor_results = {c: [] for c in anchor_curves}
-    for sd in seeds:
-        loader = build_loader(config, transform, h5_path, _eval_mask(config), snr, sd,
-                              args.num_samples, phase2=True)
-        res = eval_all_stage2(
-            model, loader, device, anchor_curves, compute_se=False,
-            full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
-        for c in anchor_curves:
-            anchor_results[c].append(res[c]["nmse_db"])
-    rows.extend(_reduce_rows({"magnitude_only": anchor_results["magnitude_only"]}, 0.0, "nmse_db"))
-    rows.extend(_reduce_rows({"full_feedback": anchor_results["full_feedback"]}, 100.0, "nmse_db"))
-    print("[nmse_overhead] anchors: magnitude_only@0%, full_feedback@100% done")
+    if run_anchors:
+        anchor_curves = [c for c in (args.curves or ["magnitude_only", "full_feedback"])
+                         if c in ("magnitude_only", "full_feedback")]
+        anchor_results = {c: [] for c in anchor_curves}
+        for sd in seeds:
+            loader = build_loader(config, transform, h5_path, _eval_mask(config), snr, sd,
+                                  args.num_samples, phase2=True)
+            res = eval_all_stage2(
+                model, loader, device, anchor_curves, compute_se=False,
+                full_fb_quantizer=quantizers.get(_quant_curve_name(16)) if quantizers else None)
+            for c in anchor_curves:
+                anchor_results[c].append(res[c]["nmse_db"])
+        if "magnitude_only" in anchor_curves:
+            rows.extend(_reduce_rows({"magnitude_only": anchor_results["magnitude_only"]}, 0.0, "nmse_db"))
+        if "full_feedback" in anchor_curves:
+            rows.extend(_reduce_rows({"full_feedback": anchor_results["full_feedback"]}, 100.0, "nmse_db"))
+        print("[nmse_overhead] anchors: magnitude_only@0%, full_feedback@100% done")
     return rows, "Pilot overhead (%)", "NMSE (dB)"
 
 
@@ -560,6 +610,20 @@ def _eval_mask(config):
     )
 
 
+def _dft_uniform_mask_generator(config, target_overhead=None, base_spacing=None):
+    """Build an independent *uniform* mask generator for the DFT baseline.
+
+    This lets ``dft_interp`` operate on a clean comb grid whose density is
+    configured independently of the main adaptive/nonuniform mask.
+    """
+    M = int(config.data.num_subcarriers)
+    if target_overhead is not None:
+        return make_mask_generator("uniform", M, target_overhead=target_overhead)
+    if base_spacing is None:
+        base_spacing = int(getattr(config.phase2.sampling, "base_spacing", 8))
+    return make_mask_generator("uniform", M, base_spacing=base_spacing)
+
+
 def _load_stage2(args, config, device):
     stage1_ckpt = str(config.phase2.stage1_checkpoint) if getattr(
         config.phase2, "stage1_checkpoint", None) else None
@@ -578,6 +642,24 @@ def _reduce_rows(per_curve, x, metric):
         std = float(t.std(unbiased=False).item()) if t.numel() > 1 else 0.0
         rows.append((curve, x, metric, mean, std))
     return rows
+
+
+def _merge_with_csv(new_rows, csv_path):
+    """Merge new rows into an existing CSV, replacing curves that appear in new_rows.
+
+    This lets the user re-run a subset of curves (e.g. only ``dft_interp``)
+    without recomputing the rest.
+    """
+    replace_curves = {r[0] for r in new_rows}
+    kept = []
+    with open(csv_path, newline="") as f:
+        reader = csv.reader(f)
+        next(reader)  # header
+        for row in reader:
+            if row and row[0] not in replace_curves:
+                kept.append((row[0], float(row[1]), row[2], float(row[3]), float(row[4])))
+    merged = kept + [tuple(r) for r in new_rows]
+    return merged
 
 
 def write_csv(rows, path):
@@ -647,6 +729,8 @@ def main():
         args, config, transform, device, h5_path)
 
     csv_path = os.path.join(out_dir, f"results_{args.figure}.csv")
+    if args.curves is not None and os.path.exists(csv_path):
+        rows = _merge_with_csv(rows, csv_path)
     write_csv(rows, csv_path)
     if not args.no_plot:
         png_path = os.path.join(out_dir, f"fig_{args.figure}.png")

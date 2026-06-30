@@ -47,6 +47,7 @@ class Trainer:
             angle_delay_l1_weight=float(config.training.loss.angle_delay_l1_weight),
             diversity_weight=float(config.training.loss.get("diversity_weight", 0.0)),
             use_ratio=bool(config.training.loss.get("use_ratio", False)),
+            ratio_eps=float(config.training.loss.get("ratio_eps", 1e-6)),
         )
         self.nmse_loss = NmseLoss()
         self.use_ratio = bool(config.training.loss.get("use_ratio", False))

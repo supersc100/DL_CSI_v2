@@ -20,12 +20,12 @@ data:
   # Output
   raw_data_dir: "./data/raw"
   processed_data_dir: "./data/processed"
-  h5_train: "./data/processed/train.h5"
-  h5_val: "./data/processed/val.h5"
-  h5_test: "./data/processed/test_cdla.h5"
+  h5_train: "./data/processed/train_cdld.h5"
+  h5_val: "./data/processed/val_cdld.h5"
+  h5_test: "./data/processed/test_cdld.h5"
 
   # 3GPP scenario: UMa | UMi | RMa
-  scenario: "A"
+  scenario: "UMa"
   # Carrier frequencies (Hz) for UL and DL
   ul_carrier_freq: 2.0e9   # e.g., 2 GHz uplink
   dl_carrier_freq: 2.1e9   # e.g., 2.1 GHz downlink
@@ -53,7 +53,7 @@ data:
   samples:
     train: 70000
     val: 10000
-    test: 20
+    test: 20000
 
   # Large-scale parameters to extract and share between UL/DL
   large_scale_params:
@@ -94,17 +94,17 @@ model:
   use_large_scale: true
 
   # Shared feature dimension after local encoders.
-  feature_dim: 512         # small dims for fast Stage1 training
+  feature_dim: 64         # small dims for fast Stage1 training
 
   # Hidden dimension of the Transformer fusion block.
   # Can equal feature_dim, or be different (a linear projection is added automatically).
-  hidden_dim: 512
+  hidden_dim: 64
 
   # CSI Encoder: current uplink CSI in angle-delay domain
   csi_encoder:
     in_channels: 2         # real & imag concatenated as channels
-    base_channels: 64
-    num_layers: 4          # matches trained Stage1 checkpoint
+    base_channels: 16
+    num_layers: 2          # matches trained Stage1 checkpoint
     kernel_size: 3
     use_bn: false          # LayerNorm preferred for regression
     dropout: 0.1
@@ -156,23 +156,24 @@ model:
 # Training (single-stage, end-to-end)
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 32           # Phase2 主训练 batch size；Stage1 已训练完成，32 在 RTX 4090 24 GB 上更稳
+  batch_size: 128           # Phase2 主训练 batch size；Stage1 已训练完成，32 在 RTX 4090 24 GB 上更稳
   num_workers: 8
   pin_memory: true
   gradient_clip: 1.0
 
   epochs: 50
-  lr: 1.0e-3
+  lr: 1.0e-4               # lowered for log-ratio stability
   weight_decay: 1.0e-4
   optimizer: "adamw"
   scheduler: "cosine"
 
   loss:
-    mse_weight: 1.0         # strong complex MSE to break fixed-output collapse
-    magnitude_weight: 1.0    # magnitude MSE: main objective for FDD independent fast fading
+    mse_weight: 0.1        # reduced auxiliary complex MSE
+    magnitude_weight: 1.0  # log-ratio MSE on |H_DL|/|H_UL|
     angle_delay_l1_weight: 0.1
-    diversity_weight: 0.5    # strong penalty on batch-wise collapse
-    use_ratio: true          # compute magnitude loss in |H_DL|/|H_UL| space
+    diversity_weight: 0.0  # disabled while stabilizing log-ratio training
+    use_ratio: true        # use log(|H_DL|) - log(|H_UL|) magnitude loss
+    ratio_eps: 1.0e-2      # larger eps for log stability
 
   # Training-time uplink corruption.  We heavily corrupt the UL input so the
   # network cannot ignore it and memorize an average downlink spectrum.

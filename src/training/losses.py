@@ -56,14 +56,16 @@ class CsiLoss(nn.Module):
 
         # Magnitude terms. Optionally normalize by |H_UL| so the network must
         # exploit the uplink structure instead of outputting a fixed template.
+        # We use log-ratio (log|H| - log|H_UL|) rather than raw ratio because
+        # dividing by small UL magnitudes leads to gradient explosion.
         pred_mag = pred.abs()
         target_mag = target.abs()
         if self.use_ratio:
             if current_ul is None:
                 raise ValueError("use_ratio=True requires current_ul to be passed to the loss.")
-            ul_mag = current_ul.abs().clamp_min(self.ratio_eps)
-            pred_mag = pred_mag / ul_mag
-            target_mag = target_mag / ul_mag
+            ul_mag = current_ul.abs()
+            pred_mag = torch.log(pred_mag + self.ratio_eps) - torch.log(ul_mag + self.ratio_eps)
+            target_mag = torch.log(target_mag + self.ratio_eps) - torch.log(ul_mag + self.ratio_eps)
 
         # Magnitude MSE: the predictable part under FDD independent fast fading.
         magnitude_mse = (pred_mag - target_mag).square().mean()

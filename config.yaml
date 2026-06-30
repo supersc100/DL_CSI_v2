@@ -172,6 +172,7 @@ training:
     magnitude_weight: 1.0    # magnitude MSE: main objective for FDD independent fast fading
     angle_delay_l1_weight: 0.1
     diversity_weight: 0.5    # strong penalty on batch-wise collapse
+    use_ratio: true          # compute magnitude loss in |H_DL|/|H_UL| space
 
   # Training-time uplink corruption.  We heavily corrupt the UL input so the
   # network cannot ignore it and memorize an average downlink spectrum.

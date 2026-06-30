@@ -1,6 +1,7 @@
 /.vscode
 /.claude
 /models/deepseek-1_5b
+/paper
 __pycache__/
 *.pyc
 *.h5

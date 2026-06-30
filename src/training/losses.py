@@ -1,4 +1,6 @@
 """Loss functions for FDD downlink CSI prediction."""
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +17,12 @@ class CsiLoss(nn.Module):
     DL share large-scale geometry (angles/delays/powers) but have independent
     small-scale phases.  The complex term is kept as an optional auxiliary loss
     and can be reduced/removed when only magnitude structure is required.
+
+    Args:
+        use_ratio: If True, magnitude terms are computed in the ratio space
+            |H| / |H_UL| instead of raw |H|. This forces the network to use the
+            uplink CSI because a fixed |H_DL| template no longer minimizes the
+            loss across samples with different |H_UL|.
     """
 
     def __init__(
@@ -23,25 +31,45 @@ class CsiLoss(nn.Module):
         magnitude_weight: float = 1.0,
         angle_delay_l1_weight: float = 0.1,
         diversity_weight: float = 0.0,
+        use_ratio: bool = False,
+        ratio_eps: float = 1e-6,
     ):
         super().__init__()
         self.mse_weight = mse_weight
         self.magnitude_weight = magnitude_weight
         self.angle_delay_l1_weight = angle_delay_l1_weight
         self.diversity_weight = diversity_weight
+        self.use_ratio = use_ratio
+        self.ratio_eps = ratio_eps
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        current_ul: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # Pred/target are complex64 from the regression head / dataset.
         # Real/imag extraction yields float32 automatically, satisfying the
         # "loss in float32" requirement.
         diff = pred - target
         mse = (diff.real ** 2 + diff.imag ** 2).mean()
 
+        # Magnitude terms. Optionally normalize by |H_UL| so the network must
+        # exploit the uplink structure instead of outputting a fixed template.
+        pred_mag = pred.abs()
+        target_mag = target.abs()
+        if self.use_ratio:
+            if current_ul is None:
+                raise ValueError("use_ratio=True requires current_ul to be passed to the loss.")
+            ul_mag = current_ul.abs().clamp_min(self.ratio_eps)
+            pred_mag = pred_mag / ul_mag
+            target_mag = target_mag / ul_mag
+
         # Magnitude MSE: the predictable part under FDD independent fast fading.
-        magnitude_mse = (pred.abs() - target.abs()).square().mean()
+        magnitude_mse = (pred_mag - target_mag).square().mean()
 
         # Angle-delay consistency: L1 on magnitude to preserve large-scale structure.
-        ad_l1 = (pred.abs() - target.abs()).abs().mean()
+        ad_l1 = (pred_mag - target_mag).abs().mean()
 
         loss = (
             self.mse_weight * mse
@@ -53,9 +81,9 @@ class CsiLoss(nn.Module):
         # magnitude template. Encourages the network to use input-specific
         # information instead of memorizing the average spectrum.
         if self.diversity_weight > 0.0 and pred.shape[0] > 1:
-            pred_mag = pred.abs().view(pred.shape[0], -1)
+            pred_mag_flat = pred_mag.view(pred.shape[0], -1)
             # Variance across the batch for each output dimension.
-            diversity = pred_mag.var(dim=0).mean()
+            diversity = pred_mag_flat.var(dim=0).mean()
             loss = loss - self.diversity_weight * diversity
 
         return loss

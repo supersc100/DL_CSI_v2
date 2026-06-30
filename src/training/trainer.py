@@ -46,8 +46,10 @@ class Trainer:
             magnitude_weight=float(config.training.loss.get("magnitude_weight", 1.0)),
             angle_delay_l1_weight=float(config.training.loss.angle_delay_l1_weight),
             diversity_weight=float(config.training.loss.get("diversity_weight", 0.0)),
+            use_ratio=bool(config.training.loss.get("use_ratio", False)),
         )
         self.nmse_loss = NmseLoss()
+        self.use_ratio = bool(config.training.loss.get("use_ratio", False))
 
         # Training-time UL corruption augmentation.
         self.ul_noise_prob = float(getattr(config.training, "ul_noise_prob", 0.0))
@@ -135,7 +137,10 @@ class Trainer:
                     if self.use_large_scale:
                         model_kwargs["large_scale"] = large_scale
                     pred_dl_ad = self.model(current_ul_ad, **model_kwargs)
-                    loss = self.criterion(pred_dl_ad, target_dl_ad)
+                    loss_kwargs = {}
+                    if self.use_ratio:
+                        loss_kwargs["current_ul"] = current_ul_ad
+                    loss = self.criterion(pred_dl_ad, target_dl_ad, **loss_kwargs)
 
                 if is_training:
                     if self.scaler is not None:

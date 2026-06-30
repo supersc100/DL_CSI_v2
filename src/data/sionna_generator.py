@@ -282,6 +282,73 @@ def _compute_large_scale_features(
     )
 
 
+def _perturb_ray_params(
+    ray_params: Dict[str, np.ndarray],
+    rng: np.random.Generator,
+    config: Any,
+) -> Dict[str, np.ndarray]:
+    """Create UL-specific ray geometry by perturbing DL ray parameters.
+
+    This makes the FDD UL/DL magnitude spectra less perfectly correlated,
+    forcing the Stage1 network to actually exploit the current uplink CSI
+    rather than memorizing a shared downlink power template.
+
+    Config section (under ``data``):
+
+        ul_geometry_perturbation:
+          enabled: true
+          angle_std_deg: 3.0      # std of azimuth angle perturbation
+          delay_std_s: 5.0e-9     # std of delay perturbation
+          power_std_db: 3.0       # std of per-path power perturbation in dB
+
+    If ``enabled`` is false or the section is missing, the DL ray parameters
+    are returned unchanged.
+    """
+    perturb_cfg = getattr(config.data, "ul_geometry_perturbation", None)
+    if perturb_cfg is None or not bool(getattr(perturb_cfg, "enabled", False)):
+        return ray_params
+
+    angle_std_deg = float(getattr(perturb_cfg, "angle_std_deg", 0.0))
+    delay_std_s = float(getattr(perturb_cfg, "delay_std_s", 0.0))
+    power_std_db = float(getattr(perturb_cfg, "power_std_db", 0.0))
+
+    out: Dict[str, np.ndarray] = dict(ray_params)
+
+    def _wrap_angle(a: np.ndarray) -> np.ndarray:
+        return (a + 180.0) % 360.0 - 180.0
+
+    if "aoa" in out and angle_std_deg > 0.0:
+        aoa = np.asarray(out["aoa"], dtype=np.float64)
+        aoa = _wrap_angle(aoa + rng.normal(scale=angle_std_deg, size=aoa.shape))
+        out["aoa"] = aoa.astype(np.float32)
+    if "aod" in out and angle_std_deg > 0.0:
+        aod = np.asarray(out["aod"], dtype=np.float64)
+        aod = _wrap_angle(aod + rng.normal(scale=angle_std_deg, size=aod.shape))
+        out["aod"] = aod.astype(np.float32)
+    if "zoa" in out and angle_std_deg > 0.0:
+        zoa = np.asarray(out["zoa"], dtype=np.float64)
+        zoa = _wrap_angle(zoa + rng.normal(scale=angle_std_deg, size=zoa.shape))
+        out["zoa"] = zoa.astype(np.float32)
+    if "zod" in out and angle_std_deg > 0.0:
+        zod = np.asarray(out["zod"], dtype=np.float64)
+        zod = _wrap_angle(zod + rng.normal(scale=angle_std_deg, size=zod.shape))
+        out["zod"] = zod.astype(np.float32)
+
+    if "tau" in out and delay_std_s > 0.0:
+        tau = np.asarray(out["tau"], dtype=np.float64)
+        tau = np.maximum(tau + rng.normal(scale=delay_std_s, size=tau.shape), 1e-12)
+        out["tau"] = tau.astype(np.float32)
+
+    if "powers" in out and power_std_db > 0.0:
+        powers = np.asarray(out["powers"], dtype=np.float64)
+        power_lin = np.maximum(np.abs(powers), 1e-20)
+        power_db = 10.0 * np.log10(power_lin)
+        power_db = power_db + rng.normal(scale=power_std_db, size=power_db.shape)
+        out["powers"] = (10.0 ** (power_db / 10.0)).astype(powers.dtype)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Top-level generator
 # ---------------------------------------------------------------------------
@@ -334,6 +401,10 @@ def _generate_one_sample(
     # Extract DL ray parameters.
     ray_params_dl = _extract_ray_params(cdl_dl, tau=tau)
 
+    # Generate UL-specific ray geometry if configured.  This breaks the perfect
+    # UL/DL magnitude correlation that makes Stage1 trivial.
+    ray_params_ul = _perturb_ray_params(ray_params_dl, rng, config)
+
     # Manually synthesize DL frequency response from extracted rays.
     h_cir_dl, tau_dl, aoa_dl, aod_dl = _synthesize_cir_from_rays(
         ray_params_dl,
@@ -354,9 +425,9 @@ def _generate_one_sample(
 
     # --- Uplink channel -----------------------------------------------------
     if synthesize_ul:
-        # Reuse DL ray parameters but resample small-scale gains for UL.
+        # UL uses perturbed geometry (if enabled) plus independent small-scale gains.
         h_cir_ul, tau_ul, aoa_ul, aod_ul = _synthesize_cir_from_rays(
-            ray_params_dl,  # shared large-scale
+            ray_params_ul,
             num_tx,
             num_rx,
             ul_freq,
@@ -403,11 +474,11 @@ def _generate_one_sample(
         history_dl = []
         for _ in range(history_window):
             h_cir_t, _, _, _ = _synthesize_cir_from_rays(
-                ray_params_dl, num_tx, num_rx, ul_freq,
+                ray_params_ul, num_tx, num_rx, ul_freq,
                 float(config.data.bandwidth), int(config.data.num_subcarriers), rng,
             )
             h_t_ul = _cir_to_frequency_response(
-                h_cir_t, tau_dl, ul_freq,
+                h_cir_t, tau_ul, ul_freq,
                 float(config.data.subcarrier_spacing), int(config.data.num_subcarriers),
             ).transpose(1, 0, 2)
             history_ul.append(h_t_ul)

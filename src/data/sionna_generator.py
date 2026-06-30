@@ -361,7 +361,12 @@ def _generate_one_sample(
     """Generate one FDD UL/DL channel sample."""
     sionna = _import_sionna()
 
-    cdl_name = _scenario_to_cdl(config.data.scenario)
+    # Support both a fixed scenario (str) and a randomized list of scenarios.
+    scenarios = config.data.scenario
+    if isinstance(scenarios, str):
+        scenarios = [scenarios]
+    scenario = str(rng.choice(scenarios))
+    cdl_name = _scenario_to_cdl(scenario)
     dl_freq = float(config.data.dl_carrier_freq)
     ul_freq = float(config.data.ul_carrier_freq)
     bs_array = _make_array_config(config.data.bs_array, dl_freq)

@@ -143,6 +143,7 @@ model:
     output_mode: "amp_phase"
     use_residual_log_amp: true   # 残差 log-幅度头，输出以 UL 幅度为基准
     residual_eps: 1.0e-6
+    max_log_ratio: 5.0           # 限制 |log|H_DL|/|H_UL||| ≤ 5 nats（约 ±43 dB）
 
 # -----------------------------------------------------------------------------
 # Training

@@ -31,12 +31,14 @@ class RegressionHead(nn.Module):
         dropout: float = 0.1,
         use_residual_log_amp: bool = False,
         residual_eps: float = 1e-6,
+        max_log_ratio: float = 5.0,
     ):
         super().__init__()
         self.output_mode = output_mode
         self.output_dim = output_dim
         self.use_residual_log_amp = use_residual_log_amp
         self.residual_eps = residual_eps
+        self.max_log_ratio = max_log_ratio
 
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -72,7 +74,9 @@ class RegressionHead(nn.Module):
                         "use_residual_log_amp=True requires ul_log_mag to be passed to the head."
                     )
                 # Residual log-amplitude: log|H_DL| = log|H_UL| + delta.
-                delta_log_amp = x[:, :num_elements]
+                # Bound delta to avoid exp() overflow/underflow while still
+                # allowing a wide dynamic range (±max_log_ratio nats).
+                delta_log_amp = torch.tanh(x[:, :num_elements]) * self.max_log_ratio
                 phase_raw = x[:, num_elements:]
                 amp = torch.exp(ul_log_mag + delta_log_amp)
                 phase = torch.tanh(phase_raw) * math.pi

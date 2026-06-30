@@ -144,6 +144,9 @@ class DlCsiPredictor(nn.Module):
             dropout=float(config.model.regression_head.dropout),
             use_residual_log_amp=self.use_residual_log_amp,
             residual_eps=self.residual_eps,
+            max_log_ratio=float(
+                config.model.regression_head.get("max_log_ratio", 5.0)
+            ),
         )
 
     def _prepare_inputs(

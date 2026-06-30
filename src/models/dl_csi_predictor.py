@@ -129,12 +129,21 @@ class DlCsiPredictor(nn.Module):
         num_elements = num_tx * num_rx * num_subcarriers
         output_dim = num_elements * 2  # real + imag
 
+        self.use_residual_log_amp = bool(
+            config.model.regression_head.get("use_residual_log_amp", False)
+        )
+        self.residual_eps = float(
+            config.model.regression_head.get("residual_eps", 1e-6)
+        )
+
         self.regression_head = RegressionHead(
             input_dim=self.hidden_dim,
             output_dim=output_dim,
             hidden_dim=int(config.model.regression_head.hidden_dim),
             output_mode=self.output_mode,
             dropout=float(config.model.regression_head.dropout),
+            use_residual_log_amp=self.use_residual_log_amp,
+            residual_eps=self.residual_eps,
         )
 
     def _prepare_inputs(
@@ -198,8 +207,16 @@ class DlCsiPredictor(nn.Module):
 
         # Predict downlink CSI in angle-delay domain (keep float32 for stability).
         with torch.amp.autocast("cuda", enabled=False):
+            head_kwargs = {}
+            if self.use_residual_log_amp:
+                # Flatten current UL magnitude and take log for the residual head.
+                b = current_ul_ad.shape[0]
+                ul_log_mag = torch.log(
+                    current_ul_ad.abs().view(b, -1).float() + self.residual_eps
+                )
+                head_kwargs["ul_log_mag"] = ul_log_mag
             pred_dl_ad = self.regression_head(
-                pooled.float(), target_shape=(-1, *self.csi_shape)
+                pooled.float(), target_shape=(-1, *self.csi_shape), **head_kwargs
             )
         return pred_dl_ad
 

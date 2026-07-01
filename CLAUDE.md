@@ -341,7 +341,37 @@ Runs all Stage 1 baselines:
 4. `no_large_scale` — UL only ablation.
 5. `no_history` — UL only ablation (conceptually no history).
 
-### 7.3 Stage 2 Evaluation
+### 7.3 Stage 1 SNR Sweep
+
+`scripts/run_stage1_snr_curve.py` evaluates a trained Stage 1 model over a range of
+uplink SNRs by injecting AWGN into `h_ul` before the angle-delay transform. It also
+runs a `copy_ul` baseline at each SNR point for comparison.
+
+```bash
+python scripts/run_stage1_snr_curve.py \
+    --config config.yaml \
+    --checkpoint outputs/checkpoints/best.pt \
+    --split test \
+    --snr-list -20 -10 -5 0 5 10 15 20 \
+    --output-csv ./outputs/stage1_snr_curve.csv \
+    --output-png ./outputs/stage1_snr_curve.png
+```
+
+Arguments:
+
+- `--config`: path to the config used for training (must match checkpoint dims).
+- `--checkpoint`: trained Stage 1 checkpoint.
+- `--split`: `train`, `val`, or `test` (default `test`).
+- `--snr-list`: list of SNR points in dB (default `-10 -5 0 5 10 15 20`).
+- `--output-csv`: path for the result CSV (default `./outputs/stage1_snr_curve.csv`).
+- `--output-png`: path for the plotted figure (default `./outputs/stage1_snr_curve.png`).
+
+Outputs:
+
+- CSV with columns `snr_db`, `method`, `magnitude_nmse_db`, `nmse_db`, `cosine_similarity`.
+- PNG plot of `magnitude_nmse_db` vs `snr_db` for both `copy_ul` and `proposed`.
+
+### 7.4 Stage 2 Evaluation
 
 ```bash
 python scripts/evaluate_phase2.py \
@@ -367,7 +397,7 @@ python scripts/evaluate_phase2.py \
     --quantized
 ```
 
-### 7.4 Stage 2 Baselines
+### 7.5 Stage 2 Baselines
 
 `evaluate_phase2.py` also runs Stage 2 baselines configured under `phase2.evaluation.baselines`:
 
@@ -378,7 +408,7 @@ python scripts/evaluate_phase2.py \
 
 Planned ablations (`no_magnitude`, `no_ul_guidance`) are supported by constructing the corresponding `PhaseRecoveryNetwork` variant and comparing checkpoints.
 
-### 7.5 Paper Simulation Curves (SNR / overhead sweeps)
+### 7.6 Paper Simulation Curves (SNR / overhead sweeps)
 
 `scripts/run_simulation.py` produces the figures in `researchPlan/simPlan.md` by injecting
 AWGN and switching pilot overhead / sampling strategy **at evaluation time**, reusing trained

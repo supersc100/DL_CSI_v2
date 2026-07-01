@@ -2,6 +2,7 @@
 /.claude
 /models/deepseek-1_5b
 /paper
+/csi_env
 __pycache__/
 *.pyc
 *.h5

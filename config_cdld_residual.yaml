@@ -1,19 +1,19 @@
 # =============================================================================
-# DL-CSI-v2: 多场景混合 + UL 几何扰动 + 残差 log-幅度头 配置
+# DL-CSI-v2: 单一 CDL-D (UMa) 场景 + 残差 log-幅度头 配置
 # =============================================================================
-# 与 config_multi_scenario.yaml 相比：
-#   - 回归头改为残差 log-幅度：log|H_DL| = log|H_UL| + delta
-#   - 从结构上保证 Stage1 输出必须依赖当前上行 CSI 的幅度
+# 与 config_multi_scenario_residual.yaml 相比：
+#   - 只使用单一 CDL-D (UMa) 场景，用于和多场景训练做对比
+#   - 保留 UL 几何扰动和残差 log-幅度头
 # =============================================================================
 
 project:
-  name: "DL_CSI_v2_multi_scenario_residual"
+  name: "DL_CSI_v2_cdld_residual"
   seed: 42
   device: "cuda"            # 固定 CUDA
-  mixed_precision: true     # RTX 4090 支持 bf16；若出现数值问题可改为 false
-  output_dir: "./outputs_multi_scenario_residual"
-  log_dir: "./outputs_multi_scenario_residual/logs"
-  checkpoint_dir: "./outputs_multi_scenario_residual/checkpoints"
+  mixed_precision: false    # 单一场景实验默认 fp32；需要速度可改为 true
+  output_dir: "./outputs_cdld_residual"
+  log_dir: "./outputs_cdld_residual/logs"
+  checkpoint_dir: "./outputs_cdld_residual/checkpoints"
 
 # -----------------------------------------------------------------------------
 # Data generation (Sionna 2.x, TensorFlow backend)
@@ -21,17 +21,13 @@ project:
 data:
   raw_data_dir: "./data/raw"
   processed_data_dir: "./data/processed"
-  h5_train: "./data/processed/train_multi.h5"
-  h5_val: "./data/processed/val_multi.h5"
-  h5_test: "./data/processed/test_multi.h5"
+  h5_train: "./data/processed/train_cdld.h5"
+  h5_val: "./data/processed/val_cdld.h5"
+  h5_test: "./data/processed/test_cdld.h5"
 
-  # 多场景混合训练：每次生成样本时随机选一个 3GPP scenario。
-  # UMa -> CDL-D, UMi -> CDL-C, RMa -> CDL-A。
-  # 多场景混合可防止网络记忆固定 DL 模板，迫使其利用当前 UL。
-  scenario:
-    - "UMa"
-    - "UMi"
-    - "RMa"
+  # 单一 CDL-D (UMa) 场景，用于和多场景训练做对比。
+  # 单一场景下网络更容易记忆固定 DL 模板，可验证残差头是否能强制利用 UL。
+  scenario: "UMa"
 
   ul_carrier_freq: 2.0e9   # 上行载频 (Hz)
   dl_carrier_freq: 2.1e9   # 下行载频 (Hz)，与上行间隔 100 MHz
@@ -67,8 +63,8 @@ data:
     - "k_factor"
     - "bs_ue_distance"
 
-  # UL 几何扰动：在生成 UL 时对共享的 DL 射线参数加随机扰动，
-  # 进一步降低 UL/DL 幅度谱的相关性，避免网络只靠共享几何生存。
+  # UL 几何扰动：在生成 UL 时对共享的 DL 射线参数加随机扰动。
+  # 单一场景下 UL/DL 幅度谱原本高度相关，扰动可降低相关度，避免模板 collapse。
   ul_geometry_perturbation:
     enabled: true
     angle_std_deg: 5.0      # AoD/AoA 扰动标准差（度）
@@ -167,7 +163,7 @@ training:
     mse_weight: 0.0           # 关闭复数 MSE；相位独立，无法学习
     magnitude_weight: 1.0     # 幅度 MSE（残差头下等价于 delta_log_amp MSE）
     angle_delay_l1_weight: 0.1
-    diversity_weight: 0.005   # 多场景下模板更难形成，diversity 可适当减小
+    diversity_weight: 0.005   # 防止网络 collapse 到固定 DL 模板
     use_ratio: true           # 在 log-ratio 空间学习，进一步绑定 UL
     ratio_eps: 1.0e-2         # log-ratio 稳定常数
 
@@ -207,7 +203,7 @@ evaluation:
 # -----------------------------------------------------------------------------
 phase2:
   enabled: true
-  stage1_checkpoint: "./outputs_multi_scenario_residual/checkpoints/best.pt"
+  stage1_checkpoint: "./outputs_cdld_residual/checkpoints/best.pt"
 
   model:
     feat_dim: 256
@@ -308,5 +304,5 @@ simulation:
   quant_bits_list: [16, 8, 4, 2]
   fixed_snr: 10.0
   seeds: [42, 43, 44]
-  output_dir: "./outputs_multi_scenario_residual/sim"
+  output_dir: "./outputs_cdld_residual/sim"
   scenarios: ["A", "C", "D"]

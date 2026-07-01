@@ -10,7 +10,7 @@ project:
   name: "DL_CSI_v2_cdld_residual"
   seed: 42
   device: "cuda"            # 固定 CUDA
-  mixed_precision: false    # 单一场景实验默认 fp32；需要速度可改为 true
+  mixed_precision: true     # 单一场景实验默认 fp32；需要速度可改为 true
   output_dir: "./outputs_cdld_residual"
   log_dir: "./outputs_cdld_residual/logs"
   checkpoint_dir: "./outputs_cdld_residual/checkpoints"

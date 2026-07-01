@@ -20,12 +20,14 @@ data:
   # Output
   raw_data_dir: "./data/raw"
   processed_data_dir: "./data/processed"
-  h5_train: "./data/processed/train_cdld.h5"
-  h5_val: "./data/processed/val_cdld.h5"
-  h5_test: "./data/processed/test_cdld.h5"
+  h5_train: "./data/processed/train_mixed.h5"
+  h5_val: "./data/processed/val_mixed.h5"
+  h5_test: "./data/processed/test_mixed.h5"
 
-  # 3GPP scenario: UMa | UMi | RMa
-  scenario: "UMa"
+  # 3GPP scenario: UMa | UMi | RMa, or a list for mixed-scene training.
+  # Mixed scenarios improve generalization and prevent the network from
+  # memorizing a single propagation template.
+  scenario: ["UMa", "UMi", "RMa"]
   # Carrier frequencies (Hz) for UL and DL
   ul_carrier_freq: 2.0e9   # e.g., 2 GHz uplink
   dl_carrier_freq: 2.1e9   # e.g., 2.1 GHz downlink
@@ -69,6 +71,15 @@ data:
   batch_size_per_file: 512 # how many samples to accumulate before flushing to H5
   num_workers: 4           # parallel generation workers (set 0 if TF/Sionna unstable)
   save_ray_info: true      # keep aod/aoa/tau/powers arrays in H5 for debug
+
+  # UL geometry perturbation: deliberately break the perfect UL/DL large-scale
+  # geometry correlation so that Stage 1 must exploit the current UL CSI rather
+  # than memorizing a shared downlink template.
+  ul_geometry_perturbation:
+    enabled: true
+    angle_std_deg: 3.0      # std of azimuth angle perturbation
+    delay_std_s: 5.0e-9     # std of delay perturbation
+    power_std_db: 3.0       # std of per-path power perturbation in dB
 
 # -----------------------------------------------------------------------------
 # Pre-processing: spatial-frequency -> angle-delay domain
@@ -150,7 +161,14 @@ model:
   regression_head:
     hidden_dim: 1024        # matches trained Stage1 checkpoint
     dropout: 0.1
-    output_mode: "ri"      # "ri" = real+imag concatenated, "amp_phase" = amp/phase
+    # "amp_phase" is required for the residual log-amplitude branch.
+    output_mode: "amp_phase"
+    # Residual log-amplitude head: log|H_DL_pred| = log|H_UL| + delta_log_amp.
+    # This explicitly ties the Stage1 output to the current UL CSI and prevents
+    # fixed-template collapse.
+    use_residual_log_amp: true
+    residual_eps: 1.0e-6
+    max_log_ratio: 5.0
 
 # -----------------------------------------------------------------------------
 # Training (single-stage, end-to-end)

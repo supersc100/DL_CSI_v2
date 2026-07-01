@@ -89,7 +89,7 @@ Input
 ├── current UL CSI (spatial-frequency)
 │   └── 2D-DFT (antenna) + IFFT (subcarrier)  -->  Angle-Delay domain
 │       └── CsiEncoder (3D CNN + LN + GELU)    -->  feature token [D]
-├── historical UL/DL pairs (T=16 slots)
+├── historical UL/DL pairs (T=16 slots)         (optional, default off)
 │   └── per-slot CNN + Lightweight Transformer -->  temporal token [D]
 └── large-scale parameters (6-10 dims)
     └── Environment Encoder (MLP + SiLU)       -->  env token [D]
@@ -97,9 +97,12 @@ Input
         Cross-attention fusion / concat        -->  [B, num_tokens, D]
         TransformerFusion (small Transformer)  -->  [B, num_tokens, H]
         Mean pool                              -->  [B, H]
-        Regression Head (MLP)                  -->  predicted DL CSI (Angle-Delay)
+        Regression Head (MLP)
+        └── amp_phase mode + residual log-amp  -->  log|H_DL| = log|H_UL| + delta
         Inverse FFT                            -->  spatial-frequency DL CSI
 ```
+
+The default Stage 1 configuration disables history and uses a **residual log-amplitude regression head**: instead of predicting raw downlink amplitudes, the head predicts a bounded correction `delta_log_amp` on top of the current uplink log-magnitude. This explicitly couples the output to the uplink CSI and prevents the shortcut-learning collapse where the network memorizes a fixed downlink power template.
 
 ### 3.2 Stage 2: Phase Recovery
 
@@ -133,10 +136,14 @@ Stage 1 (frozen)                Sparse DL subbands (zero-padded grid)
 ### 3.3 Key Design Decisions
 
 - **Angle-Delay domain**: DFT along the BS antenna dimension and IFFT along subcarriers using `torch.fft`, so gradients back-propagate through the transform.
-- **CNN encoders**: 3D convolutions extract local structure from angle-delay CSI tensors; a lightweight Transformer aggregates historical slots.
+- **CNN encoders**: 3D convolutions extract local structure from angle-delay CSI tensors; a lightweight Transformer aggregates historical slots (when enabled).
 - **Transformer fusion**: a small domain-specific Transformer (not a pre-trained LLM) models interactions among the modality tokens `[current_ul, temporal, env]`.
 - **End-to-end single-stage training (Stage 1)**: all components are trainable from the start; no staged freezing or adapter tuning is required.
-- **Stage 1 loss**: the regression head still predicts complex-valued DL CSI in the angle-delay domain, but the training objective focuses on **magnitude MSE**.  In FDD, UL and DL share large-scale geometry (angles/delays/path powers) yet have independent small-scale phases, so predicting the exact complex channel is infeasible; the magnitude/angle-delay power spectrum is the learnable and useful part.  A small complex-MSE term and an angle-delay L1 consistency term are kept as optional auxiliaries.
+- **Stage 1 residual log-amplitude head**: the regression head operates in `amp_phase` mode and predicts a bounded residual `delta_log_amp` such that `log|H_DL_pred| = log|H_UL| + delta_log_amp`. This explicitly ties the predicted magnitude to the current uplink CSI and prevents fixed-template collapse.
+- **Stage 1 log-ratio magnitude loss**: instead of raw magnitude MSE, the loss minimizes `(log|pred| - log|UL|) - (log|target| - log|UL|)`. Because a fixed-template output no longer minimizes the loss when `|H_UL|` varies across samples, the network is forced to exploit the uplink CSI.
+- **UL geometry perturbation at data generation**: the Sionna generator optionally perturbs UL ray angles, delays, and powers (`data.ul_geometry_perturbation`) so that UL/DL large-scale geometry is only approximately reciprocal. This further prevents the network from ignoring the uplink input.
+- **Training-time UL corruption**: during Stage 1 training, the current UL CSI is randomly corrupted with AWGN (`ul_noise_prob` / `ul_noise_snr_list`) and random spatial-frequency masking (`ul_mask_prob` / `ul_mask_ratio`). These augmentations act as a "shortcut-learning vaccine" by making a fixed downlink template sub-optimal.
+- **Mixed-scene training data**: `data.scenario` can be a list (e.g. `["UMa", "UMi", "RMa"]`) so that each sample is drawn from a random CDL model. Mixed training improves generalization and reduces over-fitting to a single propagation template.
 - **Stage 2 decoupling**: magnitude and phase are recovered by two separate networks. The magnitude predictor is frozen and only its output magnitude is reused; the phase network consumes sparse downlink subband observations, a sampling mask, the Stage 1 magnitude prior, and the current UL CSI for energy-guided sampling.
 - **Magnitude-guided attention**: sparse subband features query against Stage 1 magnitude features so that strong propagation paths receive higher weight during phase interpolation.
 - **Phase as cos/sin**: the phase head predicts cos and sin separately and L2-normalizes them to unit magnitude, avoiding `2π` wrapping and `atan2` discontinuities.
@@ -229,11 +236,13 @@ If both print success messages and no NaN metrics appear, the Stage 2 pipeline i
 python scripts/generate_data.py --config config.yaml --split train val test
 ```
 
-This creates:
+This creates (paths depend on `config.data.h5_*`):
 
-- `data/processed/train.h5`
-- `data/processed/val.h5`
-- `data/processed/test.h5`
+- `data/processed/train_mixed.h5`
+- `data/processed/val_mixed.h5`
+- `data/processed/test_mixed.h5`
+
+when `data.scenario` is set to a list such as `["UMa", "UMi", "RMa"]`. To generate a single-scene dataset, set `data.scenario` to a single string such as `"UMa"` and update the H5 paths accordingly.
 
 Each file contains:
 
@@ -241,14 +250,42 @@ Each file contains:
 |---|---|---|
 | `h_ul` | [N, N_tx_bs, N_rx_ue, M] | current uplink CSI |
 | `h_dl` | [N, N_tx_bs, N_rx_ue, M] | current downlink CSI (target) |
-| `history_ul` | [N, T, N_tx_bs, N_rx_ue, M] | past T UL snapshots |
-| `history_dl` | [N, T, N_tx_bs, N_rx_ue, M] | past T DL snapshots |
+| `history_ul` | [N, T, N_tx_bs, N_rx_ue, M] | past T UL snapshots (optional) |
+| `history_dl` | [N, T, N_tx_bs, N_rx_ue, M] | past T DL snapshots (optional) |
 | `large_scale` | [N, 6] | large-scale parameter vector |
 | `tau/aoa/aod/powers` | variable | raw ray geometry (optional, debug) |
 
 Stage 2 reuses the same full-band H5 files. Sparse downlink subbands and binary sampling masks are generated on-the-fly in `FddCsiDataset` (`src/data/dataset.py`), so no separate subband H5 is required.
 
-### 5.2 Generate TDD Oracle Split (Performance Upper Bound)
+### 5.2 Mixed-Scene vs. Single-Scene Data
+
+The Sionna generator supports both a fixed scenario and a randomized list of scenarios:
+
+```yaml
+# Single scene
+scenario: "UMa"
+
+# Mixed scenes
+scenario: ["UMa", "UMi", "RMa"]
+```
+
+Mixed-scene training is recommended for the proposed method because it improves generalization across CDL models and reduces the risk of the network memorizing a single propagation template. When `scenario` is a list, `_generate_one_sample` draws one scene per sample at random. The list can also contain raw CDL model names (`"A"`, `"C"`, `"D"`).
+
+### 5.3 UL Geometry Perturbation
+
+To break the perfect UL/DL large-scale correlation that makes Stage 1 trivial, the generator supports `data.ul_geometry_perturbation`:
+
+```yaml
+ul_geometry_perturbation:
+  enabled: true
+  angle_std_deg: 3.0      # azimuth angle perturbation std
+  delay_std_s: 5.0e-9     # delay perturbation std
+  power_std_db: 3.0       # per-path power perturbation std
+```
+
+When enabled, UL ray angles, delays, and powers are perturbed relative to DL before the uplink CIR is synthesized. This forces the Stage 1 network to exploit the current UL CSI rather than relying on a shared DL template.
+
+### 5.4 Generate TDD Oracle Split (Performance Upper Bound)
 
 ```bash
 python scripts/generate_data.py --config config.yaml --split test --tdd-oracle-split test
@@ -256,11 +293,12 @@ python scripts/generate_data.py --config config.yaml --split test --tdd-oracle-s
 
 This writes `data/processed/test_tdd_oracle.h5`, where UL and DL share identical fast fading.
 
-### 5.3 Notes on Sionna Integration
+### 5.5 Notes on Sionna Integration
 
 - Sionna is TensorFlow-based; the generator isolates TF/Sionna imports inside `src/data/sionna_generator.py`.
 - Ray parameters (`_aod`, `_aoa`, `_powers`, `_tau`) are read from the CDL object after initialization; if a Sionna version moves these attributes, adjust `_extract_ray_params`.
 - The generator manually synthesizes CIRs from extracted rays with independent small-scale gains for UL/DL, so the two channels share large-scale geometry but not fast fading.
+- When `ul_geometry_perturbation.enabled` is true, the uplink geometry is perturbed relative to the downlink geometry before CIR synthesis, making UL/DL large-scale correlation approximate rather than perfect.
 
 ---
 
@@ -277,6 +315,9 @@ python scripts/train.py --config config.yaml
 ```
 
 - All model components are trainable.
+- The regression head uses `output_mode: "amp_phase"` with `use_residual_log_amp: true` by default, so the predicted log-magnitude is `log|H_UL| + delta_log_amp`.
+- The magnitude loss uses the **log-ratio** form `(log|pred| - log|UL|) vs. (log|target| - log|UL|)` when `training.loss.use_ratio: true`.
+- Training-time UL augmentations (AWGN corruption and random spatial-frequency masking) are applied with probabilities configured by `training.ul_noise_prob`, `training.ul_noise_snr_list`, `training.ul_mask_prob`, and `training.ul_mask_ratio`.
 - Best checkpoint is saved to `outputs/checkpoints/best.pt`.
 - Periodic checkpoints are saved to `outputs/checkpoints/epoch{epoch}.pt`.
 - `train.py` supports `--smoke-test`, `--num-samples`, and `--epochs` for quick experiments.
@@ -467,7 +508,9 @@ All hyperparameters live in `config.yaml`. Key sections:
 Before first run, update at least:
 
 - `data.h5_train/val/test` paths (if you move them),
+- `data.scenario` (single string or list) and `data.ul_geometry_perturbation` for the desired training distribution,
 - `model.env_encoder.input_dim` to match `data.large_scale_params` length,
+- `model.regression_head.output_mode` and `model.regression_head.use_residual_log_amp` to match the Stage 1 head variant,
 - `phase2.stage1_checkpoint` to point to a trained Stage 1 checkpoint,
 - GPU memory-dependent settings: `training.batch_size`, `phase2.model.*` dims.
 
@@ -527,6 +570,7 @@ Before first run, update at least:
 - Stage 2 structural-prior fusion from UL CSI (`use_ul_guidance`) is left as an optional extension; the interface is reserved in `config.yaml` but not implemented.
 - Stage 2 ablation baselines (`no_magnitude`, `no_ul_guidance`) require running separate model variants. The `no_magnitude` variant is wired via `phase2.model.use_magnitude: false` (train a separate checkpoint); `no_ul_guidance` remains a reserved interface.
 - Iso-overhead fairness in the sampling-strategy comparison (`sampling_overhead`): peak encryption *adds* a fixed neighbor budget, so `nonuniform`/`adaptive` sample more points than `uniform` at the same nominal overhead. A budget-constrained (peak-replacing) mask would be needed for a strict equal-overhead comparison.
+- Stage 1 shortcut-learning prevention (residual log-amp head, log-ratio loss, UL corruption, UL geometry perturbation, mixed-scene training) is now wired in code, but the relative contribution of each component has not been fully ablated.
 
 ---
 
